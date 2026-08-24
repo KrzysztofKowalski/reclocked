@@ -1,7 +1,7 @@
 # reclocked
 
-> Demon gubernatora pstate w przestrzeni użytkownika (`reclockd`) plus patche
-> kernela i Mesa, które utrzymują starą kartę NVIDIA GT 750M (Kepler, GK107) na
+> Demon governor pstate w przestrzeni użytkownika (`reclockd`) plus łatki
+> jądra i Mesa, które utrzymują starą kartę NVIDIA GT 750M (Kepler, GK107) na
 > użytecznych taktowaniach pod otwartym sterownikiem **nouveau** — zamiast
 > tkwić na taktowaniach rozruchowych i tracić 2-4x wydajności.
 
@@ -11,35 +11,35 @@
 [![Platform: Linux](https://img.shields.io/badge/Platform-Linux-6c757d.svg)](#instalacja)
 [![Language: C++17](https://img.shields.io/badge/C%2B%2B-17-00599c.svg)](#wymagania)
 
-`reclocked` to mały, samodzielny demon w C++17 plus patche kernela i Mesa, które
-przynoszą automatyczne re-taktowanie (reclocking) dla NVIDIA Kepler (GK107) pod
-nouveau — bez zastrzeżonego sterownika, kernelowego gubernatora i bez wsparcia
-reklokowania ze strony upstream.
+`reclocked` to mały, samodzielny demon w C++17 plus łatki jądra i Mesa, które
+dostarczają automatyczny reclocking dla NVIDIA Kepler (GK107) pod nouveau —
+bez zastrzeżonego sterownika, bez governor w jądrze i bez wsparcia reclocku
+ze strony upstream.
 
 ---
 
 ## 🖥 O projekcie
 
-Upstreamowy sterownik nouveau udostępnia ręczne re-taktowanie pstate przez
-debugfs, ale **nie ma automatycznego gubernatora**: po rozruchu karta tkwi na
+Upstreamowy sterownik nouveau udostępnia ręczny reclocking pstate przez
+debugfs, ale **nie ma automatycznego governor**: po rozruchu karta tkwi na
 najniższym pstate (`07` = 270-405 MHz rdzeń / 838 MHz pamięć), dopóki ktoś nie
-zapisaze wyższego pstate ręcznie. Na GT 750M oznacza to stratę 2-4x wydajności
-we wszystkim — od kompozycji w przeglądarce po gry z heavy shader-bound, bez
-żadnego skalowania termicznego ani obciążeniowego.
+zapisze wyższego pstate ręcznie. Na GT 750M oznacza to stratę 2-4x wydajności
+we wszystkim — od kompozycji w przeglądarce po gry shader-bound, bez
+jakiegokolwiek skalowania zależnego od temperatury czy obciążenia.
 
 `reclockd` wypełnia tę lukę. To demon w przestrzeni użytkownika, który odpytuje
-obciążenie GPU (busy%) przez liczniki bezczynności PMU na BAR0 oraz temperaturę
-przez hwmon, i zapisuje przejścia pstate przez interfejs debugfs nouveau —
-gubernator świadomy obciążenia i temperatury, którego upstream nouveau nigdy
-nie dostarczył dla Keplera. Działa jako usługa systemd, współistnieje z
+obciążenie GPU (busy%) przez liczniki idle PMU na BAR0 oraz temperaturę przez
+hwmon, i zapisuje przejścia pstate przez interfejs debugfs nouveau — governor
+uwzględniający obciążenie i temperaturę, którego upstream nouveau nigdy nie
+dostarczył dla Keplera. Działa jako usługa systemd, współistnieje z
 kompozytorem Wayland (patrz [Problem DRM master](#problem-drm-master-i-dlaczego-reclockd-go-zrzuca)),
-i obsługuje profile świadome aplikacji (np. cap niskie dla terminala, pozwól
+i obsługuje profile zależne od aplikacji (np. cap niskie dla terminala, pozwól
 na boost dla przeglądarki).
 
-To **nie** jest zamiennik brakującego kernelowego gubernatora nouveau — to
-praktyczne obejście runtime-only dla sprzętu, który nouveau de facto porzucił.
-Restart przywraca wszystko do taktowań rozruchowych; demon ponownie aplikuje
-politykę przy następnym starcie.
+To **nie** jest zamiennik brakującego governor w jądrze nouveau — to praktyczne
+obejście działające tylko w czasie działania (runtime-only), dla sprzętu, który
+nouveau de facto porzucił. Restart przywraca wszystko do taktowań rozruchowych;
+demon ponownie stosuje politykę przy następnym starcie.
 
 ### ♻️ Po co ten projekt istnieje: z elektrośmieci do używalności
 
@@ -47,17 +47,17 @@ Projekt testowany na **MacBook Pro 15" Late 2013 z NVIDIA GeForce GT 750M**
 (GK107, Kepler, NVE7, sm_30). Ta maszyna jest legendarnie problematyczna na
 otwartych sterownikach graficznych:
 
-- Kepler dGPU na nouveau nie ma auto-rekloku, więc tkwi na taktowaniach
+- Kepler dGPU na nouveau nie ma auto-reclocku, więc tkwi na taktowaniach
   rozruchowych (2-4x wolniej niż potrafi).
-- Układ dual-GPU (Intel iGPU + NVIDIA dGPU połączony przez mulaplekser Apple
-  `gmux`) sprawia, że live-switching GPU jest niestabilny.
-- Maksymalny pstate (`0f`) znany jest z zawieszania się układów klasy NVE0 przy
+- Układ dual-GPU (Intel iGPU + NVIDIA dGPU połączony przez multiplekser Apple
+  `gmux`) sprawia, że przełączanie GPU na żywo jest niestabilne.
+- Maksymalny pstate (`0f`) znany jest z zawieszania układów klasy NVE0 przy
   undervolcie.
 
 W kombinacji te MacBooki Pro z tej generacji są wycofywane jako
 **elektrośmieci**, bo „nie da się użyć dGPU porządnie pod Linuksem". `reclocked`
-to próba zmiany tego: działający stos auto-rekloku (demon + patch kernela +
-patch Mesa), który utrzymuje laptopa z 2013 z Keplerem jako używalną maszynę
+to próba zmiany tego: działający stos auto-reclocku (demon + łatka jądra +
+łatka Mesa), który utrzymuje laptopa z 2013 z Keplerem jako używalną maszynę
 codzienną w 2026. Z elektrośmieci do używalności.
 
 ---
@@ -73,13 +73,13 @@ kompozytorowi Hyprland.
 
 **Założenia:**
 
-- dGPU NVIDIA Kepler (GK107, NVE7) sterowany przez moduł kernela **nouveau**.
+- dGPU NVIDIA Kepler (GK107, NVE7) sterowany przez moduł jądra **nouveau**.
   Inne układy Keplera (GK104/GK106/GK208) lub karty nie-Kepler będą wymagały
   adaptacji wartości LADDER pstate, mapy rejestrów PMU BAR0 i lookupu hwmon.
-- Moduł nouveau jest załadowany, a karta jest **aktywna runtime** (nie
-  runtime-suspended). `reclockd` ustawia `power/control=on` na urządzeniu PCI
-  na czas swojego działania i przywraca poprzednią wartość przy wyjściu.
-- **Dostęp do pstate w debugfs**: kernel musi wystawiać
+- Moduł nouveau jest załadowany, a karta jest **aktywna w czasie działania**
+  (nie runtime-suspended). `reclockd` ustawia `power/control=on` na urządzeniu
+  PCI na czas swojego działania i przywraca poprzednią wartość przy wyjściu.
+- **Dostęp do pstate w debugfs**: jądro musi wystawiać
   `/sys/kernel/debug/dri/<bdf>/pstate` (nouveau zbudowane z
   `CONFIG_DRM_NOUVEAU_DEBUG=on`, co jest domyślne dla kerneli dystrybucyjnych).
   Demon zapisuje pstate przez ten plik, co wymaga **roota**.
@@ -87,9 +87,9 @@ kompozytorowi Hyprland.
   dGPU nouveau napędzające panel eDP (np. przez multiplekser `gmux`). Demon
   otwiera `/dev/dri/card0` tylko do synchronizacji vblank, a następnie
   natychmiast zrzuca DRM master (patrz niżej). Desktopy single-GPU nouveau też
-  działają, o ile `card0` jest urządzeniem nouveau poddanym re-taktowaniu.
+  działają, o ile `card0` jest urządzeniem nouveau poddawanym reclockowi.
 - **systemd** (dla dostarczonej jednostki `.service`) lub ręczny start.
-  `hyprctl` jest opcjonalny — gdy jest dostępny, profile świadome aplikacji
+  `hyprctl` jest opcjonalny — gdy jest dostępny, profile zależne od aplikacji
   są włączone; gdy go brak, demon cofa się do profilu `default`.
 - BDF dGPU w `reclockd.cpp` ma domyślnie `0000:01:00.0`. Dostosuj
   `PCI_RESOURCE`, `PSTATE_FILE`, `POWER_CTRL` i `DRM_CARD` w źródle, jeśli
@@ -104,23 +104,24 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
 ## ✨ Funkcje
 
 - 🎛 **Bezpieczna drabina LADDER 3-stopniowa** (`07 ↔ 0a ↔ 0e`): jeden krok
-  pstate na decyzję, nigdy skok `07 → 0e`. Przejścia są bramkowane obciążeniem
+  pstate na decyzję, nigdy skok `07 → 0e`. Przejścia są warunkowane obciążeniem
   i temperaturą z licznikami dwell.
-- 🪟 **Profile świadome aplikacji**: `default` (cap `07`, termika konserwatywna
-  — dla terminala/edytora) vs `preferred` (cap `0e` z tierem boost — dla
-  przeglądarki). Profil jest wybierany z klasy okna aktywgo/uruchomionego
-  raportowanej przez `hyprctl`. `profile-dwell` rate-limituje przełączanie,
-  żeby alt-tab nie migał sufitem.
-- 🚀 **Tier boost (`0f`)**: `0f` jest celowo **poza drabiną** — nigdy nie
-  pojawia się jako krok w auto ladder. Włącza się tylko, gdy GPU jest już przy
-  suficie drabiny (`0e`), busy > `busy-boost` przez `boost-dwell`, i temp <
-  `temp-up` przez `temp-dwell`. Straż termiczny zrzuca go natychmiast.
-- 🌡 **Per-profil straż termiczny**: downclock termiczny jest **per-profil**, a
-  nie globalny. `default` throttluje przy 65°C / odzyskuje poniżej 58°C;
-  `preferred` throttluje przy 82°C / odzyskuje poniżej 75°C. Thermal down ma
-  priorytet nad obciążeniem w obu profilach.
+- 🪟 **Profile zależne od aplikacji**: `default` (cap `07`, termika
+  konserwatywna — dla terminala/edytora) vs `preferred` (cap `0e` z tierem
+  boost — dla przeglądarki). Profil jest wybierany z klasy aktywnego/
+  uruchomionego okna raportowanej przez `hyprctl`. `profile-dwell` ogranicza
+  częstotliwość przełączeń, żeby alt-tab nie przeskakiwał po sufitach.
+- 🚀 **Tier boost (`0f`)**: `0f` jest celowo **poza drabiną** (off-ladder) —
+  nigdy nie pojawia się jako krok w auto ladder. Włącza się tylko, gdy GPU jest
+  już przy suficie drabiny (`0e`), busy > `busy-boost` przez `boost-dwell`, i
+  temp < `temp-up` przez `temp-dwell`. Zabezpieczenie termiczne zrzuca go
+  natychmiast.
+- 🌡 **Per-profil zabezpieczenie termiczne**: downclock termiczny jest
+  **per-profil**, a nie globalny. `default` obniża taktowanie przy 65°C /
+  odzyskuje poniżej 58°C; `preferred` obniża przy 82°C / odzyskuje poniżej
+  75°C. Obniżenie termiczne ma priorytet nad obciążeniem w obu profilach.
 - 🖥 **Synchronizacja vblank**: zapisy pstate są wyrównywane do vblank przez
-  `DRM_IOCTL_WAIT_VBLANK`, żeby uniknąć glitchy w trakcie scanoutu.
+  `DRM_IOCTL_WAIT_VBLANK`, żeby uniknąć zakłóceń w trakcie scanout.
 - 🔓 **DROP_MASTER**: demon zrzuca DRM master natychmiast po otwarciu `card0`,
   więc nigdy nie blokuje kompozytora Wayland w przejęciu KMS. Patrz
   [Problem DRM master](#problem-drm-master-i-dlaczego-reclockd-go-zrzuca).
@@ -131,7 +132,7 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
   żeby ponownie wczytać `/etc/reclockd.conf` bez restartu demona.
 - 🛡 **Fail-safe**: brak hwmon → warunki termiczne pominięte (nigdy emergency
   UP); SIGTERM → przywróć `--exit-state`; CLI override wygrywa z configiem.
-- 📦 **Bez zależności link na libdrm**: używa tylko surowych ioctl z
+- 📦 **Bez zależności linkowania od libdrm**: używa tylko surowych ioctl z
   `<drm/drm.h>`.
 
 ---
@@ -146,15 +147,15 @@ quirk jednej maszyny.
 ### ⚠️ Problem
 
 Gdy proces otwiera węzeł urządzenia DRM-primary (`/dev/dri/card0`) `O_RDWR`,
-kernel czyni **pierwszego otwierającego** niejawnym DRM master. Jeśli demon
-re-taktujący otworzy `card0` pierwszy i utrzyma master, a potem serwer
+jądro ustawia **pierwszego otwierającego** jako niejawnego DRM master. Jeśli
+demon reclockujący otworzy `card0` pierwszy i utrzyma master, a potem serwer
 wyświetlania (Hyprland / SDDM / logind / libseat) wystartuje i spróbuje
 przejąć to samo urządzenie przez `TakeDevice` — urządzenie jest zajęte
 (`EBUSY`), bo demon wciąż trzyma master → libseat nie może otworzyć KMS →
-kompozytor nie znajduje GPU → crashuje się → użytkownik dostaje **czarny
+kompozytor nie znajduje GPU → kończy się awarią → użytkownik dostaje **czarny
 ekran** przy starcie sesji.
 
-Objaw to czarny ekran zaraz po loginie, podczas gdy demon re-taktujący działa
+Objaw to czarny ekran zaraz po loginie, podczas gdy demon reclockujący działa
 sobie w tle trzymając master, którego nigdy nie używa do renderingu.
 
 ### ✅ Fix: DROP_MASTER
@@ -167,17 +168,17 @@ ioctl(fd, DRM_IOCTL_DROP_MASTER, 0);
 ```
 
 To zrzuca uprawnienia master (niezależnie od tego, czy demon był domyślnym
-master, czy nie), pozostawiając go jako zwykły fd non-master. Re-taktowanie
-nadal działa bez master: czekanie na vblank używa
+master, czy nie), pozostawiając go jako zwykły fd non-master. Reclocking nadal
+działa bez master: czekanie na vblank używa
 `_DRM_VBLANK_RELATIVE` + `DRM_IOCTL_WAIT_VBLANK`, co nie wymaga master.
 `EINVAL` / `ENODEV` (zwracane, gdy demon nie jest master, np. bo kompozytor
-już jest) są oczekiwane i ignorowane. Ioctle pochodzą bezpośrednio z
-`<drm/drm.h>` — brak zależności link na `libdrm`.
+już jest) są oczekiwane i ignorowane. Wywołania ioctl pochodzą bezpośrednio z
+`<drm/drm.h>` — brak zależności linkowania od `libdrm`.
 
 To jest ogólny wzorzec dla narzędzia DRM w przestrzeni użytkownika, które musi
-współistnieć z kompozytorem Wayland: otwórz czego potrzebujesz, a potem zrzuć
-master zanim wystartuje kompozytor. Sprawdzone przez współistnienie z Hyprland
-na tym sprzęcie.
+współistnieć z kompozytorem Wayland: otwórz to, czego potrzebujesz, a potem
+zrzuć master zanim wystartuje kompozytor. Sprawdzone przez współistnienie z
+Hyprland na tym sprzęcie.
 
 ---
 
@@ -191,12 +192,12 @@ reclocked/
 ├── .gitignore
 ├── reclockd/
 │   ├── reclockd.cpp                źródło demona (~1200 linii, C++17)
-│   ├── Makefile                    buduje ./reclockd (bez link na libdrm)
+│   ├── Makefile                    buduje ./reclockd (bez linkowania libdrm)
 │   ├── reclockd.conf               domyślny config (profile, progi)
 │   ├── reclockd.service            jednostka systemd (instaluje się do /etc/systemd/system/)
 │   └── reclockctl                  wrapper CLI dla systemctl + pstate.sh
 ├── patches/
-│   ├── 0001-nouveau-auto-reclock.patch   polityka auto-rekloku kernela nouveau
+│   ├── 0001-nouveau-auto-reclock.patch   polityka auto-reclocku w jądrze nouveau
 │   └── 0002-mesa-nvc0-sched-data.patch   dane latencji schedulera Mesa nvc0
 ├── pstate.sh                       inspekcja/wymuszanie pstate przez debugfs (+ override)
 ├── build-mesa.sh                   budowanie patchowanego Mesa (tylko nouveau)
@@ -209,15 +210,15 @@ reclocked/
 ## 📋 Wymagania
 
 - **g++** z C++17 (`-std=c++17`).
-- **Kernel Linux** z załadowanym modułem **nouveau** i wystawionym pstate w
+- **Jądro Linuxa** z załadowanym modułem **nouveau** i wystawionym pstate w
   debugfs (`/sys/kernel/debug/dri/<bdf>/pstate` zapisywalny/czytelny przez
   root).
 - **Nagłówki libdrm** (`<drm/drm.h>`) do definicji ioctl — zazwyczaj z pakietu
-  dev `libdrm`. **Brak zależności link-time na libdrm.**
+  dev `libdrm`. **Brak zależności linkowania od libdrm.**
 - **systemd** (opcjonalnie, ale zalecane, dla jednostki usługi).
 - **hwmon** wystawiający `temp1_input` z nazwą `nouveau` (opcjonalnie; przy
   braku warunki termiczne są pomijane fail-safe).
-- **hyprctl** (opcjonalnie, dla profili świadomych aplikacji). Bez niego demon
+- **hyprctl** (opcjonalnie, dla profili zależnych od aplikacji). Bez niego demon
   uruchamia tylko profil `default`.
 - **root**, żeby uruchomić demona (mmap BAR0 + zapis pstate w debugfs).
 
@@ -370,7 +371,7 @@ pstate.sh set ac:0a       # wymuś 0a, override
 pstate.sh auto            # czyści override (demon wznawia auto)
 ```
 
-Pstate'y na GT 750M (rdzeń / pamięć, MHz):
+Pstate na GT 750M (rdzeń / pamięć, MHz):
 
 ```
 07: 270-405 / 838      0a: 270-925 / 1560
@@ -378,7 +379,7 @@ Pstate'y na GT 750M (rdzeń / pamięć, MHz):
 ```
 
 `0a / 0e / 0f` współdzielą ten sam zakres rdzenia (max 925 MHz); różnią się
-taktem pamięci. `0e` i `0f` to agresywne re-taktowania pamięci — testuj
+taktem pamięci. `0e` i `0f` to agresywna zmiana taktowania pamięci — testuj
 ostrożnie (znane zawieszenia na NVE0 przy max pstate). Ustawienia są
 runtime-only; restart resetuje.
 
@@ -390,15 +391,15 @@ sudo cat /sys/kernel/debug/dri/0000:01:00.0/pstate
 
 ---
 
-## 🩹 Patche
+## 🩹 Łatki
 
 ### `patches/0001-nouveau-auto-reclock.patch`
 
-Dodaje politykę auto-rekloku kernela do `clk/base.c` nouveau i
+Dodaje politykę auto-reclocku w jądrze do `clk/base.c` nouveau i
 `include/nvkm/subdev/clk.h`: `nvkm_alarm` jako timer próbkujący, EMA obciążenia
-oraz liczniki progów up/down, żeby nouveau mógł re-taktować sam, bez demona w
+oraz liczniki progów up/down, żeby nouveau mógł reclockować sam, bez demona w
 przestrzeni użytkownika. To upstream-able wersja tego, co `reclockd` robi w
-przestrzeni użytkownika. Aplikuj na drzewo źródłowe kernela Linux:
+przestrzeni użytkownika. Aplikuj na drzewo źródłowe jądra Linux:
 
 ```sh
 cd /path/to/linux
@@ -408,12 +409,12 @@ patch -p1 < /path/to/0001-nouveau-auto-reclock.patch
 
 ### `patches/0002-mesa-nvc0-sched-data.patch`
 
-Uszczelnia dane latencji schedulera codegenu Mesa nvc0 w
+Doprecyzowuje dane latencji schedulera codegenu Mesa nvc0 w
 `nv50_ir_emit_nvc0.cpp` i `nv50_ir_target_nvc0.cpp`, żeby pasowały do latencji
 wykonania NAK sm30: latencja `OP_EXIT`/`OP_RET` 14 → 15, wait `sched 0x00`
 (JOIN/SYNC) 32 → 16 cykli, occupancy `OPCLASS_TEXTURE` 18 → 17 cykli, plus
-reguła `OP_MEMBAR` 16 cykli memory-pipe busy. Efekt netto dla shader-bound
-workloadów na Keplerze: około +10-30%. Aplikuj na drzewo źródłowe Mesa (patrz
+reguła `OP_MEMBAR` 16 cykli memory-pipe busy. Efekt netto dla obciążeń
+shader-bound na Keplerze: około +10-30%. Aplikuj na drzewo źródłowe Mesa (patrz
 `build-mesa.sh`):
 
 ```sh
@@ -427,15 +428,15 @@ patch -p1 < /path/to/0002-mesa-nvc0-sched-data.patch
 
 ### `pstate.sh`
 
-Inspekcja lub wymuszenie pstate GPU przez debugfs, zintegrowane z plikiem-flagi
+Inspekcja lub wymuszenie pstate GPU przez debugfs, zintegrowane z plikiem flagi
 override demona. `set` tworzy `/run/reclockd/override` i zamraża tryb auto;
 `auto` czyści. Wymaga root dla zapisu w debugfs.
 
 ### `build-mesa.sh`
 
-Instaluje zależności budowania (Arch pacman), aplikuje
+Instaluje zależności budowania (Arch pacman), nakłada
 `0002-mesa-nvc0-sched-data.patch` na drzewo Mesa w `tmp/mesa`, konfiguruje
-budowanie meson nouveau-only (bez Vulkan/OpenCL/rust/llvm) i kompiluje. **Nie**
+budowę meson nouveau-only (bez Vulkan/OpenCL/rust/llvm) i kompiluje. **Nie**
 instaluje do systemu — uruchamiaj aplikacje z `LIBGL_DRIVERS_PATH` wskazującym
 na wynik budowania, żeby porównać patchowane vs niepatchowane.
 
@@ -447,7 +448,7 @@ git clone https://gitlab.freedesktop.org/mesa/mesa.git tmp/mesa
 ### `mesa-manage.sh`
 
 Chirurgiczna instalacja/rollback patchowanego sterownika Mesa nouveau bez
-zakłócania innych sterowników (iris, swrast, ...). Działa względem layoutu
+zakłócania innych sterowników (iris, swrast, ...). Działa względem układu
 Arch Mesa 26.x „dril": kopiuje patchowany samodzielny `libdril_dri.so` jako
 `/usr/lib/dri/nouveau_dri_patched.so` i przepina symlink `nouveau_dri.so` na
 niego. Rollback przywraca symlink na systemowy `libdril_dri.so` i usuwa plik
@@ -457,7 +458,7 @@ patchowany. Komendy: `status | backup | install | restore | diff`. Flagi:
 ### `recover-gpu.sh`
 
 Ratunkowy revert, gdy eksperyment GPU zepsuje wyświetlanie. Idempotentny: tylko
-usuwa to, co znajdzie, nigdy nie aplikuje nowej konfiguracji GPU. Revertuje
+usuwa to, co znajdzie, nigdy nie aplikuje nowej konfiguracji GPU. Cofa
 `AQ_DRM_DEVICES` w `~/.config/uwsm/default`, przywraca autologin SDDM z backupu,
 a (z `--dedicated`) cofa multiplekser panelu `gpu-switch` z powrotem na dGPU.
 Uruchom z SSH lub TTY, gdy ekran jest czarny.
@@ -474,15 +475,15 @@ Uruchom z SSH lub TTY, gdy ekran jest czarny.
 
 Co `interval-ms` (domyślnie 200 ms), `reclockd`:
 
-1. Próbkuje busy% GPU z liczników bezczynności PMU BAR0 (`R_IDLE_COUNT` dla
+1. Próbkuje busy% GPU z liczników idle PMU BAR0 (`R_IDLE_COUNT` dla
    busy i total, reset po odczycie) — wartość 0-1000 promil niezależna od
-   żadnego sysfs gauge'a sterownika.
+   jakiegokolwiek wskazania sysfs sterownika.
 2. Odczytuje temperaturę z hwmon `nouveau` (`temp1_input`).
 3. Wygładza busy w oknie przesuwnym (`win-ms`, domyślnie 1 s).
 4. Odpytuje `hyprctl` co `poll-ms` (domyślnie 1 s) o klasy okna aktywnego i
    uruchomionych; aktualizuje aktywny profil (`default` vs `preferred`) z
    rate-limitingiem `profile-dwell`.
-5. Ewaluuje liczniki dwell (temp-low, temp-high, idle, boost-up) względem
+5. Sprawdza liczniki dwell (temp-low, temp-high, idle, boost-up) względem
    progów aktywnego profilu.
 6. Decyduje o docelowym pstate zgodnie z [logiką przejść](#logika-przejsc-podsumowanie)
    — jeden krok drabiny na decyzję, lub wejście/wyjście z tieru boost.
@@ -490,13 +491,13 @@ Co `interval-ms` (domyślnie 200 ms), `reclockd`:
    (`DRM_IOCTL_WAIT_VBLANK`), a następnie zapisuje 2-hex pstate do pliku
    `pstate` w debugfs.
 
-FD DRM do `card0` jest otwierany raz przy starcie do synchronizacji vblank.
-Zaraz po `open()`, demon wywołuje `DRM_IOCTL_DROP_MASTER`, więc nigdy nie
-trzyma DRM master i nigdy nie blokuje kompozytora. Patrz
+Deskryptor DRM do `card0` jest otwierany raz przy starcie do synchronizacji
+vblank. Zaraz po `open()`, demon wywołuje `DRM_IOCTL_DROP_MASTER`, więc nigdy
+nie trzyma DRM master i nigdy nie blokuje kompozytora. Patrz
 [Problem DRM master](#problem-drm-master-i-dlaczego-reclockd-go-zrzuca).
 
 Wszystkie ustawienia są **runtime-only**: restart resetuje GPU do taktowań
-rozruchowych, a demon ponownie aplikuje politykę przy następnym starcie. Przy
+rozruchowych, a demon ponownie stosuje politykę przy następnym starcie. Przy
 `SIGTERM` demon zapisuje `--exit-state` (domyślnie `0a`) i przywraca poprzednią
 wartość `power/control`.
 
@@ -507,15 +508,16 @@ wartość `power/control`.
 - ⚠️ **Zawieszenia przy max pstate `0f`**: układy Keplera klasy NVE0 znane są
   z zawieszania się przy undervolcie na maksymalnym pstate. `0f` jest
   off-ladder w `reclockd` i włączany tylko przy utrzymanym obciążeniu + niskiej
-  temperaturze; straż termiczny zrzuca go natychmiast. Jeśli w ogóle nie chcesz
-  `0f`, zostaw `boost-pstate` nieustawione w `reclockd.conf` (lub ustaw na
-  wartość ≤ `max-pstate`, co wyłącza boost).
-- 🎛 **Agresywne re-taktowanie pamięci**: `0e` i `0f` agresywnie re-taktują
-  pamięć. Testuj ostrożnie na swojej konkretnej karcie. Bezpieczna drabina
-  (`07 / 0a / 0e`) domyślnie omija najgorszy przypadek.
-- 🌡 **Termika**: per-profil thermal down ma priorytet nad obciążeniem. Jeśli
-  hwmon jest niedostępny, warunki termiczne są pomijane **fail-safe** (nigdy
-  emergency UP) — ale tracisz ochronę termiczną, więc monitoruj temp ręcznie.
+  temperaturze; zabezpieczenie termiczne zrzuca go natychmiast. Jeśli w ogóle
+  nie chcesz `0f`, pozostaw `boost-pstate` nieustawione w `reclockd.conf` (lub
+  ustaw na wartość ≤ `max-pstate`, co wyłącza boost).
+- 🎛 **Agresywna zmiana taktowania pamięci**: `0e` i `0f` agresywnie zmieniają
+  taktowanie pamięci. Testuj ostrożnie na swojej konkretnej karcie. Bezpieczna
+  drabina (`07 / 0a / 0e`) domyślnie omija najgorszy przypadek.
+- 🌡 **Termika**: per-profil obniżenie termiczne ma priorytet nad obciążeniem.
+  Jeśli hwmon jest niedostępny, warunki termiczne są pomijane **fail-safe**
+  (nigdy emergency UP) — ale tracisz ochronę termiczną, więc monitoruj temp
+  ręcznie.
 - 🆘 **`recover-gpu.sh`** jest dostarczany na wypadek, gdy eksperyment GPU
   zepsuje wyświetlanie. Uruchom z SSH lub TTY.
 - 🔐 **Demon root**: `reclockd` wymaga roota (mmap BAR0 + zapis w debugfs).
