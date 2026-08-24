@@ -1,14 +1,24 @@
 # reclocked
 
-**Automatic GPU reclocking for NVIDIA Kepler (GK107) on the nouveau driver.**
+> A userspace pstate governor daemon (`reclockd`) plus kernel and Mesa patches
+> that keep an old NVIDIA GT 750M (Kepler, GK107) running at usable clocks
+> under the open-source **nouveau** driver — instead of sitting at boot clocks
+> and losing 2-4x performance.
 
-A userspace pstate governor daemon (`reclockd`) plus kernel and Mesa patches that
-keep an old NVIDIA GT 750M (Kepler) running at usable clocks under the open-source
-nouveau driver — instead of sitting at boot clocks and losing 2-4x performance.
+> Polski: [CZYTAJMIE.md](CZYTAJMIE.md)
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform: Linux](https://img.shields.io/badge/Platform-Linux-6c757d.svg)](#installation)
+[![Language: C++17](https://img.shields.io/badge/C%2B%2B-17-00599c.svg)](#requirements)
+
+`reclocked` is a small, self-contained C++17 userspace daemon plus kernel and
+Mesa patches that bring automatic pstate reclocking to NVIDIA Kepler (GK107)
+under nouveau — without any proprietary driver, kernel governor, or reclock
+from the upstream stack.
 
 ---
 
-## About
+## 🖥 About
 
 The upstream nouveau driver exposes manual pstate reclocking through debugfs, but
 it has **no automatic governor**: after boot the GPU stays at the lowest pstate
@@ -29,7 +39,7 @@ practical, runtime-only workaround for hardware that nouveau has effectively
 abandoned. Reboot resets everything to boot clocks; the daemon re-applies policy
 on next start.
 
-### Why this project exists: from e-waste to usable
+### ♻️ Why this project exists: from e-waste to usable
 
 This project is tested on a **MacBook Pro 15" Late 2013 with the NVIDIA GeForce GT
 750M** (GK107, Kepler, NVE7, sm_30). That machine is legendarily problematic on
@@ -49,7 +59,7 @@ From e-waste to usable.
 
 ---
 
-## Hardware target & Assumptions
+## 🐧 Hardware target & Assumptions
 
 **Tested on:** MacBook Pro 15" Late 2013, NVIDIA GeForce GT 750M (GK107 / Kepler /
 NVE7 / sm_30), Arch Linux + nouveau. The Linux environment is
@@ -87,46 +97,46 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
 
 ---
 
-## Features
+## ✨ Features
 
-- **3-step safe LADDER** (`07 ↔ 0a ↔ 0e`): one pstate step per decision, never a
+- 🎛 **3-step safe LADDER** (`07 ↔ 0a ↔ 0e`): one pstate step per decision, never a
   jump `07 → 0e`. Transitions are load- and thermal-gated with dwell counters.
-- **App-aware profiles**: `default` (cap `07`, conservative thermal — for
+- 🪟 **App-aware profiles**: `default` (cap `07`, conservative thermal — for
   terminal/editor) vs `preferred` (cap `0e` with boost tier — for browser).
   Profile is chosen from the focused or running window class reported by
   `hyprctl`. `profile-dwell` rate-limits switching so alt-tab doesn't flap the
   ceiling.
-- **Boost tier (`0f`)**: `0f` is intentionally **off-ladder** — it never appears
+- 🚀 **Boost tier (`0f`)**: `0f` is intentionally **off-ladder** — it never appears
   as a step in the auto ladder. It only engages when the GPU is already at the
   ladder ceiling (`0e`), busy > `busy-boost` for `boost-dwell`, and temp <
   `temp-up` for `temp-dwell`. Thermal guard drops it instantly.
-- **Per-profile thermal guard**: thermal downclock is **per-profile**, not
+- 🌡 **Per-profile thermal guard**: thermal downclock is **per-profile**, not
   global. `default` throttles at 65°C / recovers below 58°C; `preferred`
   throttles at 82°C / recovers below 75°C. Thermal down is prioritized over
   load in both profiles.
-- **vblank sync**: pstate writes are aligned to vblank via
+- 🖥 **vblank sync**: pstate writes are aligned to vblank via
   `DRM_IOCTL_WAIT_VBLANK` to avoid mid-scanout glitches.
-- **DROP_MASTER**: the daemon drops DRM master immediately after opening
+- 🔓 **DROP_MASTER**: the daemon drops DRM master immediately after opening
   `card0` so it never blocks a Wayland compositor from taking KMS. See
   [The DRM master problem](#the-drm-master-problem-and-why-reclockd-drops-it).
-- **Manual override**: `pstate.sh set <pstate>` creates a flag-file at
+- ✋ **Manual override**: `pstate.sh set <pstate>` creates a flag-file at
   `/run/reclockd/override` that freezes auto mode; `pstate.sh auto` clears it.
   Useful for benchmarking or pinning a pstate.
-- **SIGHUP live reload**: send `SIGHUP` (or `reclockctl reload`) to re-read
+- 🔔 **SIGHUP live reload**: send `SIGHUP` (or `reclockctl reload`) to re-read
   `/etc/reclockd.conf` without restarting the daemon.
-- **Fail-safe**: missing hwmon → thermal conditions skipped (never an emergency
+- 🛡 **Fail-safe**: missing hwmon → thermal conditions skipped (never an emergency
   UP); SIGTERM → restore `--exit-state`; CLI overrides win over config.
-- **No libdrm link dependency**: uses raw `<drm/drm.h>` ioctls only.
+- 📦 **No libdrm link dependency**: uses raw `<drm/drm.h>` ioctls only.
 
 ---
 
-## The DRM master problem (and why reclockd drops it)
+## 🔓 The DRM master problem (and why reclockd drops it)
 
 This section documents a design problem that affects **any** userspace DRM
 utility that needs to coexist with a Wayland compositor (Hyprland, Sway, KDE,
 etc.). It is described here as a general pattern, not as a quirk of one machine.
 
-### The problem
+### ⚠️ The problem
 
 When a process opens a DRM-primary device node (`/dev/dri/card0`) `O_RDWR`, the
 kernel makes the **first opener** the implicit DRM master. If a reclocking
@@ -139,7 +149,7 @@ the user gets a **black screen** on session start.
 The symptom is a black screen right after login, with the reclocking daemon
 running happily in the background holding master it never uses for rendering.
 
-### The fix: DROP_MASTER
+### ✅ The fix: DROP_MASTER
 
 In `drm_open()`, `reclockd` opens `card0` with `O_RDWR | O_CLOEXEC` and then
 **immediately** calls:
@@ -161,7 +171,7 @@ starts. Proven by coexistence with Hyprland on this hardware.
 
 ---
 
-## Repository layout
+## 📁 Repository layout
 
 ```
 reclocked/
@@ -185,7 +195,7 @@ reclocked/
 
 ---
 
-## Requirements
+## 📋 Requirements
 
 - **g++** with C++17 (`-std=c++17`).
 - **Linux kernel** with the **nouveau** module loaded and debugfs pstate
@@ -201,7 +211,7 @@ reclocked/
 
 ---
 
-## Installation
+## 🔧 Installation
 
 ### 1. Build reclockd
 
@@ -240,7 +250,7 @@ journalctl -u reclockd -f  # live decisions
 
 ---
 
-## Configuration & Parameters
+## ⚙️ Configuration & Parameters
 
 `reclockd` reads `/etc/reclockd.conf` by default (override with `--config`).
 The config is a tiny INI-line format parsed by a built-in parser (no external
@@ -309,7 +319,7 @@ focused, or when running + busy > `busy-up`. Example: browsers.
 -v                     more verbose logging
 ```
 
-### Transition logic (summary)
+### 🎛 Transition logic (summary)
 
 ```
 UP   07→0a→0e  (UP-LOAD):  g_cur_idx < ceiling AND temp < temp_up (temp_dwell)
@@ -326,7 +336,7 @@ BOOST-DOWN 0f→0e:         temp > temp_up OR temp >= temp_down (INSTANT, priori
 
 ---
 
-## Usage
+## 🖥 Usage
 
 ### `reclockctl` — daemon control
 
@@ -367,7 +377,7 @@ sudo cat /sys/kernel/debug/dri/0000:01:00.0/pstate
 
 ---
 
-## Patches
+## 🩹 Patches
 
 ### `patches/0001-nouveau-auto-reclock.patch`
 
@@ -399,7 +409,7 @@ patch -p1 < /path/to/0002-mesa-nvc0-sched-data.patch
 
 ---
 
-## Scripts
+## 🛠 Scripts
 
 ### `pstate.sh`
 
@@ -446,7 +456,7 @@ a TTY when the screen is black.
 
 ---
 
-## How it works
+## ⚙️ How it works
 
 Every `interval-ms` (default 200 ms), `reclockd`:
 
@@ -466,7 +476,7 @@ Every `interval-ms` (default 200 ms), `reclockd`:
    (`DRM_IOCTL_WAIT_VBLANK`), then writes the 2-hex pstate to the debugfs
    `pstate` file.
 
-The DRM fd to `card0` is opened once at startup for vblank sync. Immediately
+The DRM FD to `card0` is opened once at startup for vblank sync. Immediately
 after `open()`, the daemon calls `DRM_IOCTL_DROP_MASTER` so it never holds DRM
 master and never blocks the compositor. See
 [The DRM master problem](#the-drm-master-problem-and-why-reclockd-drops-it).
@@ -477,27 +487,27 @@ the daemon re-applies policy on next start. On `SIGTERM`, the daemon writes
 
 ---
 
-## Safety / Risks
+## 🛡 Safety / Risks
 
-- **Max pstate `0f` lockups**: NVE0-class Kepler parts are known to lock up
+- ⚠️ **Max pstate `0f` lockups**: NVE0-class Kepler parts are known to lock up
   under undervolt at the max pstate. `0f` is off-ladder in `reclockd` and only
   entered under sustained load + cool temp; thermal guard drops it instantly.
   If you do not want `0f` at all, leave `boost-pstate` unset in
   `reclockd.conf` (or set it to a value ≤ `max-pstate`, which disables boost).
-- **Aggressive memory reclock**: `0e` and `0f` reclock memory aggressively. Test
+- 🎛 **Aggressive memory reclock**: `0e` and `0f` reclock memory aggressively. Test
   carefully on your specific card. The safe ladder (`07 / 0a / 0e`) avoids the
   worst case by default.
-- **Thermal**: per-profile thermal down is prioritized over load. If hwmon is
+- 🌡 **Thermal**: per-profile thermal down is prioritized over load. If hwmon is
   unavailable, thermal conditions are skipped **fail-safe** (never an emergency
   UP) — but you lose thermal protection, so monitor temp manually.
-- **`recover-gpu.sh`** is provided for the case where a GPU experiment breaks
+- 🆘 **`recover-gpu.sh`** is provided for the case where a GPU experiment breaks
   the display. Run it from SSH or a TTY.
-- **Root daemon**: `reclockd` requires root (mmap BAR0 + write debugfs). Audit
+- 🔐 **Root daemon**: `reclockd` requires root (mmap BAR0 + write debugfs). Audit
   the source before running it. It is a single C++17 translation unit; the whole
   policy is in `reclockd.cpp`.
 
 ---
 
-## License
+## 📜 License
 
 MIT — see [LICENSE](LICENSE).
