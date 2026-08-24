@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# reclockctl — wrapper kontroli daemona reclockd (systemd)
+# Użycie: reclockctl {start|stop|status|restart|reload|logs}
+#   start   — systemctl start reclockd
+#   stop    — systemctl stop reclockd (SIGTERM → restore exit-state)
+#   status  — systemctl status reclockd + pstate.sh status
+#   restart — systemctl restart reclockd
+#   reload  — systemctl kill -s HUP reclockd (re-read configu bez restartu)
+#   logs    — journalctl -u reclockd -f
+
+set -e
+CMD="${1:-status}"
+
+case "$CMD" in
+  start)
+    sudo -n systemctl start reclockd
+    echo "reclockd uruchomiony"
+    ;;
+  stop)
+    sudo -n systemctl stop reclockd
+    echo "reclockd zatrzymany (restore exit-state)"
+    ;;
+  status)
+    sudo -n systemctl status reclockd --no-pager 2>&1 || true
+    echo "---"
+    pstate.sh status
+    ;;
+  restart)
+    sudo -n systemctl restart reclockd
+    echo "reclockd zrestartowany"
+    ;;
+  reload)
+    sudo -n systemctl kill -s HUP reclockd
+    echo "SIGHUP wysłany — daemon re-readuje config (/etc/reclockd.conf)"
+    ;;
+  logs)
+    sudo -n journalctl -u reclockd -f --no-pager
+    ;;
+  -h|--help|help)
+    cat <<'EOF'
+reclockctl {start|stop|status|restart|reload|logs}
+  start   — uruchom daemon
+  stop    — zatrzymaj (restore exit-state)
+  status  — status systemd + pstate
+  restart — restart
+  reload  — SIGHUP (re-read configu bez restartu)
+  logs    — journalctl -f
+EOF
+    ;;
+  *)
+    echo "Nieznana komenda: $CMD" >&2
+    echo "Użycie: reclockctl {start|stop|status|restart|reload|logs}" >&2
+    exit 1
+    ;;
+esac

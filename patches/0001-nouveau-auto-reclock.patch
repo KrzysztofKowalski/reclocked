@@ -1,0 +1,350 @@
+diff --git i/drivers/gpu/drm/nouveau/include/nvkm/subdev/clk.h w/drivers/gpu/drm/nouveau/include/nvkm/subdev/clk.h
+index 6a09d397c..243169fa0 100644
+--- i/drivers/gpu/drm/nouveau/include/nvkm/subdev/clk.h
++++ w/drivers/gpu/drm/nouveau/include/nvkm/subdev/clk.h
+@@ -3,6 +3,7 @@
+ #define __NVKM_CLK_H__
+ #include <core/subdev.h>
+ #include <subdev/pci.h>
++#include <subdev/timer.h>
+ struct nvbios_pll;
+ struct nvkm_pll_vals;
+ 
+@@ -101,6 +102,14 @@ struct nvkm_clk {
+ 	int dstate; /* display adjustment (min+) */
+ 	u8  temp;
+ 
++	/* Auto-reclocking (perfmon) policy state */
++	struct nvkm_alarm auto_alarm;	/* sampling timer */
++	bool auto_active;		/* policy engaged */
++	bool auto_downclock;		/* therm emergency downclock requested */
++	u16 auto_busy;			/* EMA of busy time (0-1000) */
++	u8 auto_up;			/* consecutive samples over up-threshold */
++	u8 auto_down;			/* consecutive samples under down-threshold */
++
+ 	bool allow_reclock;
+ #define NVKM_CLK_BOOST_NONE 0x0
+ #define NVKM_CLK_BOOST_BIOS 0x1
+diff --git i/drivers/gpu/drm/nouveau/nvkm/subdev/clk/base.c w/drivers/gpu/drm/nouveau/nvkm/subdev/clk/base.c
+index 572e63846..16efff5f0 100644
+--- i/drivers/gpu/drm/nouveau/nvkm/subdev/clk/base.c
++++ w/drivers/gpu/drm/nouveau/nvkm/subdev/clk/base.c
+@@ -23,6 +23,8 @@
+  */
+ #include "priv.h"
+ 
++#include <linux/math64.h>
++
+ #include <subdev/bios.h>
+ #include <subdev/bios/boost.h>
+ #include <subdev/bios/cstep.h>
+@@ -30,6 +32,7 @@
+ #include <subdev/bios/vpstate.h>
+ #include <subdev/fb.h>
+ #include <subdev/therm.h>
++#include <subdev/timer.h>
+ #include <subdev/volt.h>
+ 
+ #include <core/option.h>
+@@ -296,6 +299,9 @@ nvkm_pstate_prog(struct nvkm_clk *clk, int pstatei)
+ 	return nvkm_cstate_prog(clk, pstate, NVKM_CLK_CSTATE_HIGHEST);
+ }
+ 
++static void nvkm_clk_auto_enable(struct nvkm_clk *);
++static void nvkm_clk_auto_disable(struct nvkm_clk *);
++
+ static void
+ nvkm_pstate_work(struct work_struct *work)
+ {
+@@ -307,6 +313,14 @@ nvkm_pstate_work(struct work_struct *work)
+ 		return;
+ 	clk->pwrsrc = power_supply_is_system_supplied();
+ 
++	/* Engage the auto-reclocking policy while the perfmon (-2) state
++	 * is requested, on either power source.
++	 */
++	if (clk->ustate_ac == -2 || clk->ustate_dc == -2)
++		nvkm_clk_auto_enable(clk);
++	else
++		nvkm_clk_auto_disable(clk);
++
+ 	nvkm_trace(subdev, "P %d PWR %d U(AC) %d U(DC) %d A %d T %d°C D %d\n",
+ 		   clk->pstate, clk->pwrsrc, clk->ustate_ac, clk->ustate_dc,
+ 		   clk->astate, clk->temp, clk->dstate);
+@@ -566,6 +580,244 @@ nvkm_clk_pwrsrc(struct nvkm_device *device)
+ 	return 0;
+ }
+ 
++/******************************************************************************
++ * Auto-Reclocking
++ *
++ * The pstate table is only walked once at ctor, leaving discrete GPUs
++ * fixed at the performance state they booted at.  This implements a
++ * simple ondemand-style policy, driven by the PMU idle counters, that
++ * adjusts the perfmon pstate (clk->astate) whenever the "auto" (-2)
++ * state is requested via the NvAutoClk / NvClkMode config options or
++ * the "pstate" debugfs file.
++ *****************************************************************************/
++#define NVKM_CLK_AUTO_INTERVAL		250000000ULL /* sampling period (ns) */
++
++#define NVKM_CLK_AUTO_UP		450	/* busy: raise pstate */
++#define NVKM_CLK_AUTO_DOWN		300	/* busy: lower pstate */
++#define NVKM_CLK_AUTO_BOOST		900	/* busy: raise directly to max */
++#define NVKM_CLK_AUTO_UP_SAMPLES	3
++#define NVKM_CLK_AUTO_DOWN_SAMPLES	10
++
++#define NVKM_CLK_AUTO_TEMP_SOFT	90	/* block raising the pstate */
++#define NVKM_CLK_AUTO_TEMP_HARD	95	/* force the lowest pstate */
++
++/* PMU idle-counter registers (see gk20a_devfreq.c for the semantics). */
++#define NVKM_CLK_AUTO_IDLE_CTRL		0x0010a50c
++#define NVKM_CLK_AUTO_IDLE_MASK		0x0010a504
++#define NVKM_CLK_AUTO_IDLE_COUNT	0x0010a508
++#define NVKM_CLK_AUTO_IDLE_COUNT_SIZE	0x10
++#define NVKM_CLK_AUTO_IDLE_TOTAL	0
++#define NVKM_CLK_AUTO_IDLE_BUSY		4
++#define NVKM_CLK_AUTO_IDLE_COUNT_MASK	0x7fffffff
++#define NVKM_CLK_AUTO_IDLE_COUNT_RESET	0x80000000
++#define NVKM_CLK_AUTO_IDLE_CTRL_MASK	0x7
++#define NVKM_CLK_AUTO_IDLE_CTRL_ALWAYS	0x3
++#define NVKM_CLK_AUTO_IDLE_CTRL_BUSY	0x2
++#define NVKM_CLK_AUTO_IDLE_BUSY_MASK	0x00200001 /* GR | CE2 */
++#define NVKM_CLK_AUTO_IDLE_THRESHOLD	0x0010a8a0
++#define NVKM_CLK_AUTO_IDLE_INTR_EN	0x0010a9e8
++#define NVKM_CLK_AUTO_IDLE_INTR_ST	0x0010a9ec
++
++static void
++nvkm_clk_auto_counter_init(struct nvkm_clk *clk)
++{
++	struct nvkm_device *device = clk->subdev.device;
++	u32 data;
++
++	/* No interrupt handling - the counters are polled. */
++	nvkm_wr32(device, NVKM_CLK_AUTO_IDLE_INTR_EN, 0x00000000);
++	nvkm_wr32(device, NVKM_CLK_AUTO_IDLE_THRESHOLD, 0x7fffffff);
++
++	/* Total cycles: count always. */
++	data = nvkm_rd32(device, NVKM_CLK_AUTO_IDLE_CTRL +
++			 (NVKM_CLK_AUTO_IDLE_TOTAL * NVKM_CLK_AUTO_IDLE_COUNT_SIZE));
++	data &= ~NVKM_CLK_AUTO_IDLE_CTRL_MASK;
++	data |= NVKM_CLK_AUTO_IDLE_CTRL_ALWAYS;
++	nvkm_wr32(device, NVKM_CLK_AUTO_IDLE_CTRL +
++		  (NVKM_CLK_AUTO_IDLE_TOTAL * NVKM_CLK_AUTO_IDLE_COUNT_SIZE), data);
++
++	/* Busy cycles: count when GR / CE2 are active. */
++	nvkm_wr32(device, NVKM_CLK_AUTO_IDLE_MASK +
++		  (NVKM_CLK_AUTO_IDLE_BUSY * NVKM_CLK_AUTO_IDLE_COUNT_SIZE),
++		  NVKM_CLK_AUTO_IDLE_BUSY_MASK);
++	data = nvkm_rd32(device, NVKM_CLK_AUTO_IDLE_CTRL +
++			 (NVKM_CLK_AUTO_IDLE_BUSY * NVKM_CLK_AUTO_IDLE_COUNT_SIZE));
++	data &= ~NVKM_CLK_AUTO_IDLE_CTRL_MASK;
++	data |= NVKM_CLK_AUTO_IDLE_CTRL_BUSY;
++	nvkm_wr32(device, NVKM_CLK_AUTO_IDLE_CTRL +
++		  (NVKM_CLK_AUTO_IDLE_BUSY * NVKM_CLK_AUTO_IDLE_COUNT_SIZE), data);
++}
++
++static void
++nvkm_clk_auto_counter_reset(struct nvkm_clk *clk)
++{
++	struct nvkm_device *device = clk->subdev.device;
++
++	nvkm_wr32(device, NVKM_CLK_AUTO_IDLE_COUNT +
++		  (NVKM_CLK_AUTO_IDLE_TOTAL * NVKM_CLK_AUTO_IDLE_COUNT_SIZE),
++		  NVKM_CLK_AUTO_IDLE_COUNT_RESET);
++	nvkm_wr32(device, NVKM_CLK_AUTO_IDLE_COUNT +
++		  (NVKM_CLK_AUTO_IDLE_BUSY * NVKM_CLK_AUTO_IDLE_COUNT_SIZE),
++		  NVKM_CLK_AUTO_IDLE_COUNT_RESET);
++	nvkm_wr32(device, NVKM_CLK_AUTO_IDLE_INTR_ST, 0x00000001);
++}
++
++static void
++nvkm_clk_auto_thermal_downclock(struct nvkm_therm *therm, bool active)
++{
++	struct nvkm_clk *clk = therm->subdev.device->clk;
++
++	if (!clk)
++		return;
++	clk->auto_downclock = active;
++	if (active)
++		nvkm_clk_astate(clk, clk->dstate, 0, false);
++}
++
++static void
++nvkm_clk_auto_enable(struct nvkm_clk *clk)
++{
++	struct nvkm_device *device = clk->subdev.device;
++
++	if (!device->timer)
++		return;
++	if (clk->auto_active)
++		return;
++	clk->auto_active = true;
++	clk->auto_busy = 0;
++	clk->auto_up = 0;
++	clk->auto_down = 0;
++	clk->auto_downclock = false;
++
++	nvkm_clk_auto_counter_init(clk);
++	nvkm_clk_auto_counter_reset(clk);
++
++	if (device->therm)
++		device->therm->emergency.downclock = nvkm_clk_auto_thermal_downclock;
++
++	nvkm_info(&clk->subdev, "auto-reclocking enabled\n");
++	nvkm_timer_alarm(device->timer, NVKM_CLK_AUTO_INTERVAL, &clk->auto_alarm);
++}
++
++static void
++nvkm_clk_auto_disable(struct nvkm_clk *clk)
++{
++	struct nvkm_device *device = clk->subdev.device;
++
++	if (!clk->auto_active)
++		return;
++	clk->auto_active = false;
++	if (device->timer)
++		nvkm_timer_alarm(device->timer, 0, &clk->auto_alarm);
++
++	if (device->therm &&
++	    device->therm->emergency.downclock == nvkm_clk_auto_thermal_downclock)
++		device->therm->emergency.downclock = NULL;
++}
++
++static void
++nvkm_clk_auto_alarm(struct nvkm_alarm *alarm)
++{
++	struct nvkm_clk *clk = container_of(alarm, typeof(*clk), auto_alarm);
++	struct nvkm_device *device = clk->subdev.device;
++	struct nvkm_therm *therm = device->therm;
++	u32 busy, total, intr;
++	int astate = clk->astate, temp = -1;
++
++	if (!clk->auto_active)
++		return;
++
++	/* Read and reset the PMU idle counters. */
++	intr  = nvkm_rd32(device, NVKM_CLK_AUTO_IDLE_INTR_ST) & 0x00000001;
++	busy  = nvkm_rd32(device, NVKM_CLK_AUTO_IDLE_COUNT +
++			  (NVKM_CLK_AUTO_IDLE_BUSY * NVKM_CLK_AUTO_IDLE_COUNT_SIZE)) &
++			  NVKM_CLK_AUTO_IDLE_COUNT_MASK;
++	total = nvkm_rd32(device, NVKM_CLK_AUTO_IDLE_COUNT +
++			  (NVKM_CLK_AUTO_IDLE_TOTAL * NVKM_CLK_AUTO_IDLE_COUNT_SIZE)) &
++			  NVKM_CLK_AUTO_IDLE_COUNT_MASK;
++	nvkm_wr32(device, NVKM_CLK_AUTO_IDLE_COUNT +
++		  (NVKM_CLK_AUTO_IDLE_BUSY * NVKM_CLK_AUTO_IDLE_COUNT_SIZE),
++		  NVKM_CLK_AUTO_IDLE_COUNT_RESET);
++	nvkm_wr32(device, NVKM_CLK_AUTO_IDLE_COUNT +
++		  (NVKM_CLK_AUTO_IDLE_TOTAL * NVKM_CLK_AUTO_IDLE_COUNT_SIZE),
++		  NVKM_CLK_AUTO_IDLE_COUNT_RESET);
++	if (intr)
++		nvkm_wr32(device, NVKM_CLK_AUTO_IDLE_INTR_ST, 0x00000001);
++
++	/* Total-counter overflow, or an inconsistent sample: assume the
++	 * GPU is fully busy, like the gk20a implementation does.
++	 */
++	if (intr || !total || busy > total)
++		busy = 1000;
++	else
++		busy = (u32)div64_u64((u64)busy * 1000, total);
++
++	/* Exponential moving average of the busy time. */
++	clk->auto_busy = ((clk->auto_busy * 7) + busy) / 8;
++
++	/* Keep the temperature used for c-state/voltage selection fresh. */
++	if (therm)
++		temp = nvkm_therm_temp_get(therm);
++	if (temp >= 0)
++		nvkm_clk_tstate(clk, temp);
++
++	/* Thermal emergency (therm downclock threshold, or extreme
++	 * temperature): force the lowest pstate.
++	 */
++	if (clk->auto_downclock || (temp >= 0 && temp >= NVKM_CLK_AUTO_TEMP_HARD)) {
++		clk->auto_up = 0;
++		clk->auto_down = 0;
++		astate = clk->dstate;
++		goto out;
++	}
++
++	/* High temperature: block raising the pstate. */
++	if (temp >= NVKM_CLK_AUTO_TEMP_SOFT) {
++		clk->auto_up = 0;
++		if (clk->auto_busy < NVKM_CLK_AUTO_DOWN &&
++		    ++clk->auto_down >= NVKM_CLK_AUTO_DOWN_SAMPLES) {
++			clk->auto_down = 0;
++			astate--;
++		} else if (clk->auto_busy >= NVKM_CLK_AUTO_DOWN) {
++			clk->auto_down = 0;
++		}
++		goto out;
++	}
++
++	/* Raise on sustained load: one pstate per step, or directly to
++	 * the highest pstate on very high load.
++	 */
++	if (clk->auto_busy >= NVKM_CLK_AUTO_UP) {
++		if (++clk->auto_up >= NVKM_CLK_AUTO_UP_SAMPLES) {
++			clk->auto_up = 0;
++			if (clk->auto_busy >= NVKM_CLK_AUTO_BOOST)
++				astate = clk->state_nr - 1;
++			else
++				astate++;
++		}
++		clk->auto_down = 0;
++	} else {
++		clk->auto_up = 0;
++	}
++
++	/* Lower on sustained idleness, one pstate per step. */
++	if (clk->auto_busy < NVKM_CLK_AUTO_DOWN) {
++		if (++clk->auto_down >= NVKM_CLK_AUTO_DOWN_SAMPLES) {
++			clk->auto_down = 0;
++			astate--;
++		}
++	} else {
++		clk->auto_down = 0;
++	}
++
++out:
++	if (clk->auto_active) {
++		if (astate != clk->astate)
++			nvkm_clk_astate(clk, astate, 0, false);
++		nvkm_timer_alarm(device->timer, NVKM_CLK_AUTO_INTERVAL, &clk->auto_alarm);
++	}
++}
++
+ /******************************************************************************
+  * subdev base class implementation
+  *****************************************************************************/
+@@ -581,6 +833,7 @@ nvkm_clk_fini(struct nvkm_subdev *subdev, enum nvkm_suspend_state suspend)
+ {
+ 	struct nvkm_clk *clk = nvkm_clk(subdev);
+ 	flush_work(&clk->work);
++	nvkm_clk_auto_disable(clk);
+ 	if (clk->func->fini)
+ 		clk->func->fini(clk);
+ 	return 0;
+@@ -674,6 +927,7 @@ nvkm_clk_ctor(const struct nvkm_clk_func *func, struct nvkm_device *device,
+ 	INIT_WORK(&clk->work, nvkm_pstate_work);
+ 	init_waitqueue_head(&clk->wait);
+ 	atomic_set(&clk->waiting, 0);
++	nvkm_alarm_init(&clk->auto_alarm, nvkm_clk_auto_alarm);
+ 
+ 	/* If no pstates are provided, try and fetch them from the BIOS */
+ 	if (!func->pstates) {
+@@ -687,6 +941,15 @@ nvkm_clk_ctor(const struct nvkm_clk_func *func, struct nvkm_device *device,
+ 		clk->state_nr = func->nr_pstates;
+ 	}
+ 
++	/* NvAutoClk engages the perfmon (-2) pstate policy on both power
++	 * sources, an alias of "NvClkMode=auto" (which is processed below
++	 * and takes precedence if both are specified).
++	 */
++	if (allow_reclock && nvkm_boolopt(device->cfgopt, "NvAutoClk", false)) {
++		clk->ustate_ac = -2;
++		clk->ustate_dc = -2;
++	}
++
+ 	mode = nvkm_stropt(device->cfgopt, "NvClkMode", &arglen);
+ 	if (mode) {
+ 		clk->ustate_ac = nvkm_clk_nstate(clk, mode, arglen);

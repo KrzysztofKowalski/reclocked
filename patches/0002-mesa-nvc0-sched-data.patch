@@ -1,0 +1,88 @@
+diff --git i/src/gallium/drivers/nouveau/codegen/nv50_ir_emit_nvc0.cpp w/src/gallium/drivers/nouveau/codegen/nv50_ir_emit_nvc0.cpp
+index e979482..f84d647 100644
+--- i/src/gallium/drivers/nouveau/codegen/nv50_ir_emit_nvc0.cpp
++++ w/src/gallium/drivers/nouveau/codegen/nv50_ir_emit_nvc0.cpp
+@@ -3180,7 +3180,7 @@ void
+ SchedDataCalculator::setDelay(Instruction *insn, int delay, Instruction *next)
+ {
+    if (insn->op == OP_EXIT || insn->op == OP_RET)
+-      delay = MAX2(delay, 14);
++      delay = MAX2(delay, 15); // EXIT exec latency (NAK sm30): 15
+ 
+    if (insn->op == OP_TEXBAR) {
+       // TODO: except if results not used before EXIT
+@@ -3218,7 +3218,8 @@ SchedDataCalculator::getCycles(const Instruction *insn, int origDelay) const
+    }
+    if (insn->sched & 0x60)
+       return (insn->sched & 0x1f) + 1;
+-   return (insn->sched == 0x04) ? 0 : 32;
++   // sched 0x00 (JOIN/SYNC) waits 16 cycles, as in NAK sm30
++   return (insn->sched == 0x04) ? 0 : 16;
+ }
+ 
+ bool
+@@ -3372,7 +3373,9 @@ SchedDataCalculator::commitInsn(const Instruction *insn, int cycle)
+          score->res.imul = cycle + 4;
+       break;
+    case OPCLASS_TEXTURE:
+-      score->res.tex = cycle + 18;
++      // TEX pipe occupancy: 17 cycles, matching the NAK sm30 exec
++      // latency for texture ops (and the comment in RegScores above)
++      score->res.tex = cycle + 17;
+       break;
+    case OPCLASS_LOAD:
+       if (insn->src(0).getFile() == FILE_MEMORY_CONST)
+@@ -3387,6 +3390,16 @@ SchedDataCalculator::commitInsn(const Instruction *insn, int cycle)
+    case OPCLASS_OTHER:
+       if (insn->op == OP_TEXBAR)
+          score->res.tex = cycle;
++      else
++      if (insn->op == OP_MEMBAR) {
++         // Memory barrier: the memory pipe stays busy for 16 cycles
++         // (NAK sm30 exec latency for MemBar).  Only subsequent memory
++         // ops are delayed; everything else can still issue.
++         for (unsigned int f = 0; f < DATA_FILE_COUNT; ++f) {
++            score->res.ld[f] = cycle + 16;
++            score->res.st[f] = cycle + 16;
++         }
++      }
+       break;
+    default:
+       break;
+diff --git i/src/gallium/drivers/nouveau/codegen/nv50_ir_target_nvc0.cpp w/src/gallium/drivers/nouveau/codegen/nv50_ir_target_nvc0.cpp
+index 37cea5d..0f622fd 100644
+--- i/src/gallium/drivers/nouveau/codegen/nv50_ir_target_nvc0.cpp
++++ w/src/gallium/drivers/nouveau/codegen/nv50_ir_target_nvc0.cpp
+@@ -577,9 +577,16 @@ TargetNVC0::isPostMultiplySupported(operation op, float f, int& e) const
+    return f == exp2f(static_cast<float>(e));
+ }
+ 
+-// TODO: better values
+-// this could be more precise, e.g. depending on the issue-to-read/write delay
+-// of the depending instruction, but it's good enough
++// Result latencies (cycles from issue until the result register can be
++// read), per instruction.  The values for Kepler are ported from NAK's
++// sm30_instr_latencies (the Rust compiler used by NVK on Kepler):
++//   fp64 -> 20, IPA -> 15, LD/ALd -> 24, IMUL -> 15, ISETP/PSETP -> 13,
++//   IADD with carry-out -> 13, TEX -> 17, everything else -> 9.
++// The previous hardcoded guesses already matched NAK for most ops; the
++// only addition is the carry-out case below.  ISETP/PSETP are not listed
++// on purpose: their predicate results are recorded with an extra 4
++// cycles in SchedDataCalculator::recordWr, which lands exactly on the
++// 13 cycles NAK uses for them.
+ int TargetNVC0::getLatency(const Instruction *i) const
+ {
+    if (chipset >= 0xe4) {
+@@ -598,8 +605,10 @@ int TargetNVC0::getLatency(const Instruction *i) const
+       default:
+          if (Target::getOpClass(i->op) == OPCLASS_TEXTURE)
+             return 17;
+-         if (i->op == OP_MUL && i->dType != TYPE_F32)
+-            return 15;
++         if (i->op == OP_MUL && !isFloatType(i->dType))
++            return 15; // integer IMUL (NAK)
++         if ((i->op == OP_ADD || i->op == OP_SUB) && i->flagsDef >= 0)
++            return 13; // carry-out: NAK IAdd2 with carry_out
+          return 9;
+       }
+    } else {

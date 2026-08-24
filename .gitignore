@@ -1,0 +1,16 @@
+# Build artifacts
+reclockd/reclockd
+*.o
+build/
+*.log
+.cache/
+
+# Mesa / envytools build artifacts (if cloned into tmp/)
+tmp/
+tmp/mesa/
+tmp/mesa-manage-scratch/
+tmp/gpu-switch/
+
+# Editor / OS
+*.swp
+.DS_Store
