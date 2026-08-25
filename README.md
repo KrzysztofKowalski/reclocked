@@ -102,18 +102,53 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
 - 🎛 **3-step safe LADDER** (`07 ↔ 0a ↔ 0e`): one pstate step per decision, never a
   jump `07 → 0e`. Transitions are load- and thermal-gated with dwell counters.
 - 🪟 **App-aware profiles**: `default` (cap `07`, conservative thermal — for
-  terminal/editor) vs `preferred` (cap `0e` with boost tier — for browser).
-  Profile is chosen from the focused or running window class reported by
-  `hyprctl`. `profile-dwell` rate-limits switching so alt-tab doesn't flap the
-  ceiling.
-- 🚀 **Boost tier (`0f`)**: `0f` is intentionally **off-ladder** — it never appears
-  as a step in the auto ladder. It only engages when the GPU is already at the
-  ladder ceiling (`0e`), busy > `busy-boost` for `boost-dwell`, and temp <
-  `temp-up` for `temp-dwell`. Thermal guard drops it instantly.
+  terminal/editor) vs `preferred` (cap `0e` — for browser). Profile is chosen
+  from the focused or running window class reported by `hyprctl`, **or** from
+  the focused window title (see title-priority below). `profile-dwell`
+  rate-limits switching so alt-tab doesn't flap the ceiling.
+- 🔁 **Hyprland re-detect**: the daemon starts as a system service *before* the
+  user session, so the `hyprctl` socket is not yet up at startup. Instead of a
+  one-shot check that leaves the daemon stuck on `default` for the whole
+  session, `reclockd` re-detects Hyprland every poll cycle until the session
+  appears — app-aware profiling activates within ~1 s of login.
+- 🛑 **GR-idle gate**: a live memory downclock while the GR engine is mid-render
+  can wedge the compositor (Kepler rewrites framebuffer timings mid-frame →
+  render-target PROP traps). vblank sync only protects scanout, not the GR
+  engine. DOWN transitions are therefore **deferred** until the instantaneous
+  busy falls below `gr-idle-promille` (default 300 ‰ = 30%). UP transitions
+  are not gated (a rising clock is safer mid-render).
+- 🏷 **Title-priority (Discord / YouTube)**: browser tabs like Discord and
+  YouTube have no window class of their own — their identity shows up in the
+  window *title*. `[preferred-titles]` matches the focused title
+  case-insensitively and, on match, **forces `0e` overriding the `busy > 80%`
+  rule** (these workloads are memory-bound, with GR busy often 16-36 %, so the
+  normal UP-LOAD path never fires). IDLE downshift is suppressed while the
+  title matches, so the app holds `0e`. Terminal focus still wins `07` (see
+  low-power below) — both key off the same focused window, so they don't
+  conflict. Priority order: TERMAL > low-power terminal > title-match > class
+  / running-busy > IDLE.
+- 💻 **Low-power terminals**: `[low-power]` lists window classes (e.g.
+  `foot`, `alacritty`, `kitty`, `ghostty`, `wezterm`). When a terminal has
+  focus, the daemon forces the `default` profile (cap `07`) with priority over
+  `preferred` — even if a browser is generating load in the background.
+- 🚀 **Boost tier (`0f`, disabled by default)**: `0f` is intentionally
+  **off-ladder** and is now **off by default** (`boost-pstate = -1`). On this
+  GT 750M, `0e` and `0a` are both stable and `0f` shows no visible gain over
+  `0e`, so boost is opt-in. Enable it by setting `boost-pstate = 0f` in
+  `reclockd.conf`: it only engages at the ladder ceiling (`0e`) under
+  sustained busy > `busy-boost` for `boost-dwell` with temp < `temp-up`, and
+  the thermal guard drops it instantly. NVE0 lockups at max pstate are known.
 - 🌡 **Per-profile thermal guard**: thermal downclock is **per-profile**, not
   global. `default` throttles at 65°C / recovers below 58°C; `preferred`
   throttles at 82°C / recovers below 75°C. Thermal down is prioritized over
-  load in both profiles.
+  load (and over title-priority) in both profiles.
+- 🌀 **Fan control (applesmc)**: on Apple laptops, `reclockd` also drives the
+  SMC fans via `/sys/devices/platform/applesmc.768/`. A linear temp→RPM curve
+  is interpolated between `fanN_min` and `fanN_max`, which are **read
+  dynamically from sysfs at startup** (not hardcoded). Default band 40-67 °C,
+  updated every poll cycle, independent of pstate. `reclockctl fan-off`
+  freezes auto (drive fans manually); `fan-on` resumes. Fail-safe restores SMC
+  auto (`manual=0`) on exit.
 - 🖥 **vblank sync**: pstate writes are aligned to vblank via
   `DRM_IOCTL_WAIT_VBLANK` to avoid mid-scanout glitches.
 - 🔓 **DROP_MASTER**: the daemon drops DRM master immediately after opening
@@ -125,7 +160,8 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
 - 🔔 **SIGHUP live reload**: send `SIGHUP` (or `reclockctl reload`) to re-read
   `/etc/reclockd.conf` without restarting the daemon.
 - 🛡 **Fail-safe**: missing hwmon → thermal conditions skipped (never an emergency
-  UP); SIGTERM → restore `--exit-state`; CLI overrides win over config.
+  UP); missing applesmc → fan control disabled silently; SIGTERM → restore
+  `--exit-state` and SMC fan auto; CLI overrides win over config.
 - 📦 **No libdrm link dependency**: uses raw `<drm/drm.h>` ioctls only.
 
 ---
@@ -179,7 +215,7 @@ reclocked/
 ├── README.md                       this file
 ├── .gitignore
 ├── reclockd/
-│   ├── reclockd.cpp                daemon source (~1200 lines, C++17)
+│   ├── reclockd.cpp                daemon source (~1600 lines, C++17)
 │   ├── Makefile                    builds ./reclockd (no libdrm link)
 │   ├── reclockd.conf               default config (profiles, thresholds)
 │   ├── reclockd.service            systemd unit (installs to /etc/systemd/system/)
@@ -263,6 +299,32 @@ deps). CLI flags override config values.
 List of `hyprctl` window classes that trigger the `preferred` profile when
 focused, or when running + busy > `busy-up`. Example: browsers.
 
+### `[preferred-titles]` section
+
+Window **titles** (case-insensitive substring match) that trigger the
+`preferred` profile with **title-priority** — forcing `0e` overriding the
+`busy > busy-up` rule. Use this for browser tabs that have no window class of
+their own (Discord, YouTube). On match, IDLE downshift is also suppressed so
+the app holds `0e`. Example: `Discord`, `YouTube`, ` - YouTube`.
+
+### `[low-power]` section
+
+Window classes that force the `default` profile (cap `07`) with priority over
+`preferred` when focused. Use this for terminals (`foot`, `alacritty`,
+`kitty`, `ghostty`, `wezterm`, ...). Terminal focus wins `07` even if a
+preferred app is busy in the background.
+
+### `[fan]` section — Apple SMC fan control
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enable` | `true` | Enable applesmc fan control. |
+| `temp-min` | `40` | °C at/below which fans sit at `fanN_min`. |
+| `temp-max` | `67` | °C at/above which fans sit at `fanN_max`. |
+
+RPM is linearly interpolated between `fanN_min` and `fanN_max`, which are read
+dynamically from sysfs at startup. Disabled silently if applesmc is absent.
+
 ### `[profile default]` — non-preferred apps (terminal/editor)
 
 | Key | Default | Meaning |
@@ -276,7 +338,7 @@ focused, or when running + busy > `busy-up`. Example: browsers.
 | Key | Default | Meaning |
 |---|---|---|
 | `max-pstate` | `0e` | Ceiling pstate. |
-| `boost-pstate` | `0f` | Off-ladder boost tier (must be off-ladder and > ceiling). |
+| `boost-pstate` | `-1` | Off-ladder boost tier, or `-1` to disable. Default disabled (`0e`/`0a` both stable, `0f` no visible gain on GT 750M). Set `0f` to opt in. |
 | `busy-boost` | `85` | % busy > → BOOST UP `0e→0f` after `boost-dwell`. |
 | `boost-dwell-ms` | `5000` | Sustained busy > `busy-boost` dwell to enter boost. |
 | `temp-down` | `82` | °C thermal down for preferred. |
@@ -296,6 +358,7 @@ focused, or when running + busy > `busy-up`. Example: browsers.
 | `win-ms` | `1000` | Sliding window for busy averaging. |
 | `exit-state` | `0a` | pstate written on SIGTERM exit. |
 | `vblank-sync` | `true` | Align pstate writes to vblank. |
+| `gr-idle-promille` | `300` | ‰ instantaneous busy below which DOWN transitions are allowed (GR-idle gate). 300 = 30 %. `0` paralyzes DOWN; `1000` disables the gate. |
 
 ### CLI flags
 
@@ -325,16 +388,27 @@ focused, or when running + busy > `busy-up`. Example: browsers.
 
 ```
 UP   07→0a→0e  (UP-LOAD):  g_cur_idx < ceiling AND temp < temp_up (temp_dwell)
-                          AND busy > busy_up. One step per decision.
+                          AND (busy > busy_up OR title_pref). One step/decision.
+                          title_pref (focused title in [preferred-titles])
+                          forces UP overriding the busy>busy_up rule (UP-TITLE).
+                          UP is NOT GR-idle gated (rising clock is safer).
 DOWN 0e→0a→07 (TERMAL|IDLE|CEILING):
                           temp > temp_down (temp_dwell) OR
-                          busy ≤ busy_down (idle_dwell) OR
+                          (busy ≤ busy_down (idle_dwell) AND !title_pref) OR
                           g_cur_idx > ceiling.
+                          DOWN is GR-idle gated: deferred until instantaneous
+                          busy ≤ gr-idle-promille ( protects GR mid-render).
+                          TERMAL has top priority ( > title, > gate threshold).
+                          IDLE is suppressed while title_pref (app holds 0e).
 BOOST 0e→0f  (BOOST-UP):  g_cur_idx == ceiling AND busy > busy_boost (boost_dwell)
-                          AND temp < temp_up (temp_dwell).
+                          AND temp < temp_up (temp_dwell). Disabled when
+                          boost-pstate = -1 (default).
 BOOST-DOWN 0f→0e:         temp > temp_up OR temp >= temp_down (INSTANT, priority)
                           OR busy < busy_up (load hysteresis).
 ```
+
+Priority hierarchy: **TERMAL > low-power terminal (→07) > title-match (→0e,
+suppress IDLE, override busy) > class / running-busy (busy-gated) > IDLE.**
 
 ---
 
@@ -344,11 +418,13 @@ BOOST-DOWN 0f→0e:         temp > temp_up OR temp >= temp_down (INSTANT, priori
 
 ```sh
 reclockctl start     # systemctl start reclockd
-reclockctl stop      # systemctl stop reclockd (restores exit-state)
-reclockctl status    # systemd status + pstate + temp + override
+reclockctl stop      # systemctl stop reclockd (restores exit-state, SMC fan auto)
+reclockctl status    # systemd status + pstate + temp + override + fans
 reclockctl restart   # systemctl restart reclockd
 reclockctl reload    # SIGHUP — re-read /etc/reclockd.conf without restart
 reclockctl logs      # journalctl -u reclockd -f
+reclockctl fan-off   # freeze auto fan control (drive fans manually via sysfs)
+reclockctl fan-on    # resume auto fan control
 ```
 
 ### `pstate.sh` — manual pstate inspection / override
@@ -490,15 +566,22 @@ Every `interval-ms` (default 200 ms), `reclockd`:
 2. Reads temperature from the `nouveau` hwmon (`temp1_input`).
 3. Smooths busy over a sliding window (`win-ms`, default 1 s).
 4. Polls `hyprctl` every `poll-ms` (default 1 s) for the focused and running
-   window classes; updates the active profile (`default` vs `preferred`) with
-   `profile-dwell` rate-limiting.
+   window class **and title**; updates the active profile (`default` vs
+   `preferred`) with `profile-dwell` rate-limiting. Re-detects Hyprland each
+   poll until the session is up (the daemon starts before the user session).
+   Title matches (`[preferred-titles]`) set `title_pref` and force `0e`
+   overriding the busy rule; terminal focus (`[low-power]`) forces `default`.
 5. Evaluates dwell counters (temp-low, temp-high, idle, boost-up) against the
    active profile's thresholds.
 6. Decides a target pstate per the [transition logic](#transition-logic-summary)
-   — one ladder step per decision, or a boost tier entry/exit.
+   — one ladder step per decision, or a boost tier entry/exit. DOWN
+   transitions are GR-idle-gated (deferred until instantaneous busy ≤
+   `gr-idle-promille`).
 7. If a transition is needed, optionally waits for vblank
    (`DRM_IOCTL_WAIT_VBLANK`), then writes the 2-hex pstate to the debugfs
    `pstate` file.
+8. Every poll cycle, if fan control is enabled, interpolates the SMC fan RPM
+   from the current temperature (applesmc), independent of pstate decisions.
 
 The DRM FD to `card0` is opened once at startup for vblank sync. Immediately
 after `open()`, the daemon calls `DRM_IOCTL_DROP_MASTER` so it never holds DRM
@@ -507,7 +590,8 @@ master and never blocks the compositor. See
 
 All settings are **runtime-only**: a reboot resets the GPU to boot clocks and
 the daemon re-applies policy on next start. On `SIGTERM`, the daemon writes
-`--exit-state` (default `0a`) and restores the prior `power/control` value.
+`--exit-state` (default `0a`), restores the prior `power/control` value, and
+restores SMC fan auto (`fanN_manual=0`).
 
 ---
 

@@ -107,19 +107,58 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
   pstate na decyzję, nigdy skok `07 → 0e`. Przejścia są warunkowane obciążeniem
   i temperaturą z licznikami dwell.
 - 🪟 **Profile zależne od aplikacji**: `default` (cap `07`, termika
-  konserwatywna — dla terminala/edytora) vs `preferred` (cap `0e` z tierem
-  boost — dla przeglądarki). Profil jest wybierany z klasy aktywnego/
-  uruchomionego okna raportowanej przez `hyprctl`. `profile-dwell` ogranicza
-  częstotliwość przełączeń, żeby alt-tab nie przeskakiwał po sufitach.
-- 🚀 **Tier boost (`0f`)**: `0f` jest celowo **poza drabiną** (off-ladder) —
-  nigdy nie pojawia się jako krok w auto ladder. Włącza się tylko, gdy GPU jest
-  już przy suficie drabiny (`0e`), busy > `busy-boost` przez `boost-dwell`, i
-  temp < `temp-up` przez `temp-dwell`. Zabezpieczenie termiczne zrzuca go
-  natychmiast.
+  konserwatywna — dla terminala/edytora) vs `preferred` (cap `0e` — dla
+  przeglądarki). Profil jest wybierany z klasy aktywnego/uruchomionego okna
+  raportowanej przez `hyprctl`, **lub** z tytułu aktywnego okna (patrz
+  title-priority niżej). `profile-dwell` ogranicza częstotliwość przełączeń,
+  żeby alt-tab nie przeskakiwał po sufitach.
+- 🔁 **Re-detect Hyprlanda**: demon startuje jako usługa systemowa *zanim*
+  powstanie sesja użytkownika, więc socket `hyprctl` nie jest jeszcze gotowy
+  przy starcie. Zamiast jednorazowego checku, który zostawiałby demona na
+  profilu `default` przez całą sesję, `reclockd` re-wykrywa Hyprlanda co cykl
+  poll, dopóki sesja się nie pojawi — profilowanie zależne od aplikacji
+  aktywuje się w ~1 s po loginie.
+- 🛑 **GR-idle gate**: live zjazd pamięci w trakcie renderowania silnika GR
+  może zawiesić kompozytora (Kepler przepisuje timingi framebuffera
+  mid-frame → trapy PROP render-targetu). Synchronizacja vblank chroni tylko
+  scanout, nie silnik GR. Przejścia DOWN są więc **odraczane**, dopóki
+  chwilowe busy nie spadnie poniżej `gr-idle-promille` (domyślnie 300 ‰ = 30 %).
+  Przejścia UP nie są gate'owane (rosnący zegar jest bezpieczniejszy
+  mid-render).
+- 🏷 **Title-priority (Discord / YouTube)**: karty w przeglądarce typu Discord
+  i YouTube nie mają własnej klasy okna — ich tożsamość widać w *tytule* okna.
+  `[preferred-titles]` dopasowuje tytuł aktywnego okna case-insensitive i przy
+  matchu **wymusza `0e` z pominięciem reguły `busy > 80 %`** (te obciążenia są
+  memory-bound, GR busy często 16-36 %, więc normalna ścieżka UP-LOAD nigdy
+  nie zaskakuje). IDLE downshift jest suppressowany, dopóki tytuł pasuje, więc
+  apka trzyma `0e`. Focus terminala nadal wygrywa `07` (patrz low-power
+  niżej) — oba patrzą na to samo aktywne okno, więc się nie gryzą. Kolejność
+  priorytetów: TERMAL > low-power terminal > title-match > class /
+  running-busy > IDLE.
+- 💻 **Terminale low-power**: `[low-power]` listuje klasy okien (np. `foot`,
+  `alacritty`, `kitty`, `ghostty`, `wezterm`). Gdy terminal ma focus, demon
+  wymusza profil `default` (cap `07`) z priorytetem nad `preferred` — nawet
+  jeśli przeglądarka generuje obciążenie w tle.
+- 🚀 **Tier boost (`0f`, domyślnie wyłączony)**: `0f` jest celowo **poza
+  drabiną** (off-ladder) i jest teraz **domyślnie wyłączony**
+  (`boost-pstate = -1`). Na tej GT 750M `0e` i `0a` są oba stabilne, a `0f`
+  nie daje widocznego zysku vs `0e`, więc boost jest opt-in. Włącz go
+  ustawiając `boost-pstate = 0f` w `reclockd.conf`: wchodzi tylko przy suficie
+  drabiny (`0e`) pod utrzymanym busy > `busy-boost` przez `boost-dwell` z
+  temp < `temp-up`, a zabezpieczenie termiczne zrzuca go natychmiast.
+  Zawieszenia NVE0 przy max pstate są znane.
 - 🌡 **Per-profil zabezpieczenie termiczne**: downclock termiczny jest
   **per-profil**, a nie globalny. `default` obniża taktowanie przy 65°C /
   odzyskuje poniżej 58°C; `preferred` obniża przy 82°C / odzyskuje poniżej
-  75°C. Obniżenie termiczne ma priorytet nad obciążeniem w obu profilach.
+  75°C. Obniżenie termiczne ma priorytet nad obciążeniem (i nad
+  title-priority) w obu profilach.
+- 🌀 **Kontrola wentylatorów (applesmc)**: na laptopach Apple `reclockd`
+  steruje też wentylatorami SMC przez `/sys/devices/platform/applesmc.768/`.
+  Krzywa temp→RPM jest interpolowana liniowo między `fanN_min` i `fanN_max`,
+  które są **czytane dynamicznie z sysfs przy starcie** (nie hardkodowane).
+  Domyślny pas 40-67 °C, aktualizacja co cykl poll, niezależnie od pstate.
+  `reclockctl fan-off` zamraża auto (steruj wentylatorami ręcznie); `fan-on`
+  wznawia. Fail-safe przywraca auto SMC (`manual=0`) przy wyjściu.
 - 🖥 **Synchronizacja vblank**: zapisy pstate są wyrównywane do vblank przez
   `DRM_IOCTL_WAIT_VBLANK`, żeby uniknąć zakłóceń w trakcie scanout.
 - 🔓 **DROP_MASTER**: demon zrzuca DRM master natychmiast po otwarciu `card0`,
@@ -131,7 +170,9 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
 - 🔔 **Live reload przez SIGHUP**: wyślij `SIGHUP` (lub `reclockctl reload`),
   żeby ponownie wczytać `/etc/reclockd.conf` bez restartu demona.
 - 🛡 **Fail-safe**: brak hwmon → warunki termiczne pominięte (nigdy emergency
-  UP); SIGTERM → przywróć `--exit-state`; CLI override wygrywa z configiem.
+  UP); brak applesmc → kontrola wentylatorów wyłączona cicho; SIGTERM →
+  przywróć `--exit-state` i auto wentylatorów SMC; CLI override wygrywa z
+  configiem.
 - 📦 **Bez zależności linkowania od libdrm**: używa tylko surowych ioctl z
   `<drm/drm.h>`.
 
@@ -191,7 +232,7 @@ reclocked/
 ├── CZYTAJMIE.md                    ten plik (PL)
 ├── .gitignore
 ├── reclockd/
-│   ├── reclockd.cpp                źródło demona (~1200 linii, C++17)
+│   ├── reclockd.cpp                źródło demona (~1600 linii, C++17)
 │   ├── Makefile                    buduje ./reclockd (bez linkowania libdrm)
 │   ├── reclockd.conf               domyślny config (profile, progi)
 │   ├── reclockd.service            jednostka systemd (instaluje się do /etc/systemd/system/)
@@ -276,6 +317,32 @@ zewnętrznych zależności). Flagi CLI nadpisują wartości z configu.
 Lista klas okien `hyprctl`, które uruchamiają profil `preferred`, gdy są
 aktywne (focused), lub gdy działają + busy > `busy-up`. Przykład: przeglądarki.
 
+### Sekcja `[preferred-titles]`
+
+**Tytuły** okien (dopasowanie substring case-insensitive), które uruchamiają
+profil `preferred` z **title-priority** — wymuszając `0e` z pominięciem reguły
+`busy > busy-up`. Używaj dla kart w przeglądarce, które nie mają własnej klasy
+okna (Discord, YouTube). Przy matchu IDLE downshift jest suppressowany, więc
+apka trzyma `0e`. Przykład: `Discord`, `YouTube`, ` - YouTube`.
+
+### Sekcja `[low-power]`
+
+Klasy okien, które wymuszają profil `default` (cap `07`) z priorytetem nad
+`preferred`, gdy mają focus. Używaj dla terminali (`foot`, `alacritty`,
+`kitty`, `ghostty`, `wezterm`, ...). Focus terminala wygrywa `07` nawet, gdy
+apka preferred generuje obciążenie w tle.
+
+### Sekcja `[fan]` — kontrola wentylatorów Apple SMC
+
+| Klucz | Domyślnie | Znaczenie |
+|---|---|---|
+| `enable` | `true` | Włącz kontrolę wentylatorów applesmc. |
+| `temp-min` | `40` | °C, przy/poniżej którego wentylatory siedzą na `fanN_min`. |
+| `temp-max` | `67` | °C, przy/powyżej którego wentylatory siedzą na `fanN_max`. |
+
+RPM jest interpolowany liniowo między `fanN_min` i `fanN_max`, czytanymi
+dynamicznie z sysfs przy starcie. Wyłączane cicho, gdy applesmc nie istnieje.
+
 ### `[profile default]` — aplikacje nie-preferred (terminal/edytor)
 
 | Klucz | Domyślnie | Znaczenie |
@@ -289,7 +356,7 @@ aktywne (focused), lub gdy działają + busy > `busy-up`. Przykład: przeglądar
 | Klucz | Domyślnie | Znaczenie |
 |---|---|---|
 | `max-pstate` | `0e` | Sufit pstate. |
-| `boost-pstate` | `0f` | Tier boost poza drabiną (musi być off-ladder i > sufit). |
+| `boost-pstate` | `-1` | Tier boost poza drabiną, lub `-1` by wyłączyć. Domyślnie wyłączony (`0e`/`0a` oba stabilne, `0f` bez widocznego zysku na GT 750M). Ustaw `0f`, by włączyć. |
 | `busy-boost` | `85` | % busy > → BOOST UP `0e→0f` po `boost-dwell`. |
 | `boost-dwell-ms` | `5000` | Dwell utrzymanego busy > `busy-boost` do wejścia w boost. |
 | `temp-down` | `82` | °C thermal down dla preferred. |
@@ -309,6 +376,7 @@ aktywne (focused), lub gdy działają + busy > `busy-up`. Przykład: przeglądar
 | `win-ms` | `1000` | Okno przesuwne do uśredniania busy. |
 | `exit-state` | `0a` | pstate zapisywany przy wyjściu SIGTERM. |
 | `vblank-sync` | `true` | Wyrównuj zapisy pstate do vblank. |
+| `gr-idle-promille` | `300` | ‰ chwilowego busy, poniżej którego przejścia DOWN są dozwolone (GR-idle gate). 300 = 30 %. `0` paraliżuje DOWN; `1000` wyłącza gate. |
 
 ### Flagi CLI
 
@@ -338,16 +406,27 @@ aktywne (focused), lub gdy działają + busy > `busy-up`. Przykład: przeglądar
 
 ```
 UP   07→0a→0e  (UP-LOAD):  g_cur_idx < sufit AND temp < temp_up (temp_dwell)
-                          AND busy > busy_up. Jeden krok na decyzję.
+                          AND (busy > busy_up OR title_pref). Jeden krok/decyzja.
+                          title_pref (tytuł aktywny w [preferred-titles])
+                          wymusza UP z pominięciem reguły busy>busy_up (UP-TITLE).
+                          UP NIE jest GR-idle gate'owane (rosnący zegar bezpieczniejszy).
 DOWN 0e→0a→07 (TERMAL|IDLE|CEILING):
                           temp > temp_down (temp_dwell) OR
-                          busy ≤ busy_down (idle_dwell) OR
+                          (busy ≤ busy_down (idle_dwell) AND !title_pref) OR
                           g_cur_idx > sufit.
+                          DOWN jest GR-idle gate'owane: odraczane, dopóki
+                          chwilowe busy > gr-idle-promille ( chroni GR mid-render).
+                          TERMAL ma najwyższy priorytet ( > title, > próg gate).
+                          IDLE jest suppressowane, dopóki title_pref (apka trzyma 0e).
 BOOST 0e→0f  (BOOST-UP):  g_cur_idx == sufit AND busy > busy_boost (boost_dwell)
-                          AND temp < temp_up (temp_dwell).
+                          AND temp < temp_up (temp_dwell). Wyłączone, gdy
+                          boost-pstate = -1 (domyślnie).
 BOOST-DOWN 0f→0e:         temp > temp_up OR temp >= temp_down (INSTANT, priorytet)
                           OR busy < busy_up (histereza obciążenia).
 ```
+
+Hierarchia priorytetów: **TERMAL > low-power terminal (→07) > title-match (→0e,
+suppress IDLE, override busy) > class / running-busy (busy-gated) > IDLE.**
 
 ---
 
@@ -357,11 +436,13 @@ BOOST-DOWN 0f→0e:         temp > temp_up OR temp >= temp_down (INSTANT, priory
 
 ```sh
 reclockctl start     # systemctl start reclockd
-reclockctl stop      # systemctl stop reclockd (przywraca exit-state)
-reclockctl status    # status systemd + pstate + temp + override
+reclockctl stop      # systemctl stop reclockd (przywraca exit-state, auto wentylatorów SMC)
+reclockctl status    # status systemd + pstate + temp + override + wentylatory
 reclockctl restart   # systemctl restart reclockd
 reclockctl reload    # SIGHUP — ponownie wczytaj /etc/reclockd.conf bez restartu
 reclockctl logs      # journalctl -u reclockd -f
+reclockctl fan-off   # zamroź auto wentylatorów (steruj ręcznie przez sysfs)
+reclockctl fan-on    # wznów auto wentylatorów
 ```
 
 ### `pstate.sh` — ręczna inspekcja / override pstate
@@ -504,16 +585,25 @@ Co `interval-ms` (domyślnie 200 ms), `reclockd`:
    jakiegokolwiek wskazania sysfs sterownika.
 2. Odczytuje temperaturę z hwmon `nouveau` (`temp1_input`).
 3. Wygładza busy w oknie przesuwnym (`win-ms`, domyślnie 1 s).
-4. Odpytuje `hyprctl` co `poll-ms` (domyślnie 1 s) o klasy okna aktywnego i
-   uruchomionych; aktualizuje aktywny profil (`default` vs `preferred`) z
-   rate-limitingiem `profile-dwell`.
+4. Odpytuje `hyprctl` co `poll-ms` (domyślnie 1 s) o klasę i **tytuł** okna
+   aktywnego i uruchomionych; aktualizuje aktywny profil (`default` vs
+   `preferred`) z rate-limitingiem `profile-dwell`. Re-wykrywa Hyprlanda co
+   cykl poll, dopóki sesja nie wstanie (demon startuje przed sesją
+   użytkownika). Match tytułu (`[preferred-titles]`) ustawia `title_pref` i
+   wymusza `0e` z pominięciem reguły busy; focus terminala (`[low-power]`)
+   wymusza `default`.
 5. Sprawdza liczniki dwell (temp-low, temp-high, idle, boost-up) względem
    progów aktywnego profilu.
 6. Decyduje o docelowym pstate zgodnie z [logiką przejść](#logika-przejsc-podsumowanie)
    — jeden krok drabiny na decyzję, lub wejście/wyjście z tieru boost.
+   Przejścia DOWN są GR-idle gate'owane (odraczane, dopóki chwilowe busy >
+   `gr-idle-promille`).
 7. Jeśli potrzebne przejście, opcjonalnie czeka na vblank
    (`DRM_IOCTL_WAIT_VBLANK`), a następnie zapisuje 2-hex pstate do pliku
    `pstate` w debugfs.
+8. Co cykl poll, jeśli kontrola wentylatorów jest włączona, interpoluje RPM
+   wentylatorów SMC z bieżącej temperatury (applesmc), niezależnie od decyzji
+   pstate.
 
 Deskryptor DRM do `card0` jest otwierany raz przy starcie do synchronizacji
 vblank. Zaraz po `open()`, demon wywołuje `DRM_IOCTL_DROP_MASTER`, więc nigdy
@@ -522,8 +612,8 @@ nie trzyma DRM master i nigdy nie blokuje kompozytora. Patrz
 
 Wszystkie ustawienia są **runtime-only**: restart resetuje GPU do taktowań
 rozruchowych, a demon ponownie stosuje politykę przy następnym starcie. Przy
-`SIGTERM` demon zapisuje `--exit-state` (domyślnie `0a`) i przywraca poprzednią
-wartość `power/control`.
+`SIGTERM` demon zapisuje `--exit-state` (domyślnie `0a`), przywraca poprzednią
+wartość `power/control` i przywraca auto wentylatorów SMC (`fanN_manual=0`).
 
 ---
 

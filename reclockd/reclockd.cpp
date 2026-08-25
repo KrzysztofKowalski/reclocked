@@ -53,8 +53,49 @@
 // Bezpieczeństwo: walidacja pstate ∈ {07,0a,0e,0f}, nigdy zapis gdy ten sam stan,
 // SIGTERM→restore --exit-state, fail-safe hwmon (brak temp → pominięte warunki
 // termalne, nigdy awaryjny UP). Brak Hyprlanda/hyprctl → fallback do default.
+//
+// v4.1 (2026-08-25):
+//   A. BUG-fix detekcji Hyprlanda: detect() jednorazowe przy starcie demona
+//      (systemd → przed sesją) zostawiało demona na default cap=07 na zawsze.
+//      Teraz cykliczny re-detect co poll_ms gdy !hypr_alive.
+//   B. GR-idle gate: DOWN transycje (reclok pamięci w locie) odraczane gdy
+//      chwilowy busy > gr-idle-promille (default 300‰). vblank chroni scanout,
+//      nie GR mid-render — live DOWN pod renderem = wedge kanału (crash pulpitu).
+//      UP-LOAD/BOOST-UP NIE gate'owane (rosnący zegar bezpieczniejszy).
+//   C. Detekcja Discord/YouTube po tytule okna ([preferred-titles], case-
+//      insensitive) — są kartami w przeglądarce, nie mają własnej klasy.
+//   D. [low-power] (terminale): focus terminala → wymusza default cap=07 z
+//      priorytetem nad preferred (YouTube w tle nie podbija zegara).
+//   E. JSON escape fix w json_str/json_str_all (\" \\ \n \t).
+//
+// v4.2 (2026-08-25):
+//   F. KONTROLA WENTYLATORÓW applesmc: klasa Fan — liniowa krzywa temp→RPM dla
+//      obu wentylatorów (fan1=Lewa, fan2=Prawa). Zakresy RPM (fanN_min/max) czytane
+//      DYNAMICZNIE z sysfs przy starcie (nie hardkodowane — "wg 2ch wartosci" min/
+//      max na wentylator). x = clamp((temp - temp_min) / (temp_max - temp_min), 0,1);
+//      rpm = fanN_min + round(x * (fanN_max - fanN_min)). Aktualizacja co poll_ms
+//      (1 s). Sekcja [fan]: enable/temp-min(40)/temp-max(67).
+//   G. FAN OVERRIDE: flag-file `/run/reclockd/fan-override` zamraża auto wentyl.
+//      (użytkownik steruje ręcznie: cusfan.sh / fullfan.sh). reclockctl fan-off/on.
+//   H. FAIL-SAFE wentylatorów: restore_auto() przy wyjściu zdejmuje fanN_manual=0
+//      → SMC przejmuje auto (nigdy nie zostawiaj wentyl. zablokowanych na manualu).
+//      init() fail (brak applesmc / absurdalne zakresy) → fan wyłączony bez błędu.
+//
+// v4.3 (2026-08-25):
+//   I. TITLE-MATCH = NAJWYŻSZY priorytet sygnału preferred. Dopasowanie tytułu
+//      okna (Discord/YouTube, sekcja [preferred-titles]) ustawia flagę title_pref,
+//      która omija regułę busy>busy_up w UP-LOAD: title-match AND temp<temp_up
+//      przez temp_dwell AND poniżej ceiling → UP o 1 poziom BEZ busy-gate (reason
+//      UP-TITLE). Powód: Discord/YouTube są memory-bound (GR busy 16-36%, nigdy
+//      >80%), więc v4.1/v4.2 utykały na 0a — user nie czuł różnicy. Dodatkowo
+//      title_pref SUPPRESSuje IDLE downshift (reason IDLE pominięty gdy title_pref)
+//      — apka z focusem trzyma ceiling 0e. TERMAL DOWN pozostaje aktywne (ochrona
+//      termiczna > priorytet tytułu). CEILING DOWN pozostaje (low-power terminal
+//      z focusem > title-match — patrz low-power gate). UP-TITLE NIE jest gate'owane
+//      GR-idle (rosnący zegar bezpieczniejszy).
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <csignal>
 #include <cstdarg>
@@ -86,7 +127,13 @@ static const char* POWER_CTRL   = "/sys/bus/pci/devices/0000:01:00.0/power/contr
 static const char* HWMON_DIR    = "/sys/class/hwmon";
 static const char* DRM_CARD     = "/dev/dri/card0"; // dGPU (nouveau) — eDP scanout
 static const char* OVERRIDE_FILE = "/run/reclockd/override";
+static const char* FAN_OVERRIDE_FILE = "/run/reclockd/fan-override";
 static const char* DEFAULT_CONFIG = "/etc/reclockd.conf";
+
+// v4.2: SMC applesmc — sterowanie wentylatorami MacBooka. fan1=Lewa,
+// fan2=Prawa. fanN_manual (1=manual, 0=auto SMC) + fanN_output (cel RPM).
+// fanN_min/fanN_max czytane dynamicznie przy starcie (zależne od HW).
+static const char* FAN_BASE = "/sys/devices/platform/applesmc.768";
 
 // ------------------------------------- rejestry PMU (BAR0) wg gk20a_devfreq.c
 
@@ -152,6 +199,14 @@ struct Profile {
 struct Config {
     //Lista class-ów aplikacji "preferred" (dopasowywane do hyprctl class).
     std::set<std::string> preferred_classes;
+    // v4.1: tytuły okien "preferred" (substring case-insensitive; np. "YouTube",
+    // "Discord"). Discord/YouTube są kartami w przeglądarce — nie mają własnej
+    // klasy okna, więc detekcja po tytule jest dodatkową ścieżką obok klasy.
+    std::set<std::string> preferred_titles;
+    // v4.1: klasy okien "low-power" (terminale). Gdy okno z focusem pasuje →
+    // wymuś profil default (cap=07) z priorytetem nad preferred (nawet jeśli
+    // Discord/YouTube generuje load w tle, terminal z focusem trzyma 07).
+    std::set<std::string> low_power_classes;
 
     Profile def;       // profil default (apka nie-preferred)
     Profile preferred; // profil preferred (apka z listy)
@@ -166,6 +221,20 @@ struct Config {
     int  profile_dwell_ms = 2000; // rate-limit zmiany profilu
     int  poll_ms        = 1000;   // okres pollingu hyprctl (multiplik interval)
     int  exit_state     = 0x07;
+    // v4.1: próg chwilowego busy (‰) poniżej którego DOWN transycje są
+    // dozwolone (GR-idle gate). reclok pamięci w locie pod renderowaniem GR
+    // wedge'uje silnik (udokumentowane: live 0a→07 → 631 trapów PROP). vblank
+    // chroni scanout, NIE chroni GR mid-render — ten gate odracza DOWN aż
+    // busy dolinie. UP-LOAD/BOOST-UP NIE są gate'owane (rosnący zegar pamięci
+    // bezpieczniejszy; UP wymaga busy>80% więc gate na 30% blokowałby UP).
+    int  gr_idle_promille = 300;
+    // v4.2: kontrola wentylatorów applesmc. Krzywa temp→RPM: liniowa interpolacja
+    // między fanN_min (temp_min) a fanN_max (temp_max), aktualizowana co poll_ms
+    // (1 s). fanN_min/fanN_max czytane dynamicznie z sysfs przy starcie (nie
+    // hardkodowane — każde HW ma inny zakres). Override flag-file zatrzymuje auto.
+    bool fan_enable     = true;
+    int  fan_temp_min   = 40;     // °C → min RPM (najcicho)
+    int  fan_temp_max   = 67;     // °C → max RPM (najgłośniej)
     bool vblank_sync    = true;
     bool probe = false;
     bool dry   = false;
@@ -241,6 +310,25 @@ static std::string trim(const std::string& s)
     return s.substr(a, b - a + 1);
 }
 
+// v4.1: case-insensitive substring. Pusty needle → false (nie traktuj pustego
+// wzorca jako match — zapobiega fałszywym sygnałom pref przy pustych wpisach).
+static bool icontains(const std::string& hay, const std::string& needle)
+{
+    if (needle.empty()) return false;
+    if (needle.size() > hay.size()) return false;
+    auto to_lower = [](unsigned char c) { return static_cast<char>(std::tolower(c)); };
+    for (size_t i = 0; i + needle.size() <= hay.size(); i++) {
+        bool match = true;
+        for (size_t j = 0; j < needle.size(); j++) {
+            if (to_lower((unsigned char)hay[i + j]) != to_lower((unsigned char)needle[j])) {
+                match = false; break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
 // ------------------------------------------------------------------ config parser
 // Format:
 //   [preferred]
@@ -292,6 +380,25 @@ static bool load_config(const std::string& path, Config& cfg)
             cfg.preferred_classes.insert(t);
             continue;
         }
+        if (section == "preferred-titles") {
+            cfg.preferred_titles.insert(t);
+            continue;
+        }
+        if (section == "low-power") {
+            cfg.low_power_classes.insert(t);
+            continue;
+        }
+        // v4.2: sekcja [fan] — klucze klucz=wartość (enable/temp-min/temp-max).
+        if (section == "fan") {
+            size_t eqf = t.find('=');
+            if (eqf == std::string::npos) continue;
+            std::string keyf = trim(t.substr(0, eqf));
+            std::string valf = trim(t.substr(eqf + 1));
+            if      (keyf == "enable")   cfg.fan_enable   = (valf == "1" || valf == "true" || valf == "yes");
+            else if (keyf == "temp-min") cfg.fan_temp_min = parse_int(valf);
+            else if (keyf == "temp-max") cfg.fan_temp_max = parse_int(valf);
+            continue;
+        }
         // Sekcje [profile default] / [profile preferred] oraz ew. [global].
         size_t eq = t.find('=');
         std::string key, val;
@@ -328,6 +435,15 @@ static bool load_config(const std::string& path, Config& cfg)
         else if (key == "poll-ms")           cfg.poll_ms           = parse_int(val);
         else if (key == "exit-state")        cfg.exit_state        = parse_state(val);
         else if (key == "vblank-sync")       cfg.vblank_sync       = (val == "1" || val == "true" || val == "yes");
+        else if (key == "gr-idle-promille")  cfg.gr_idle_promille  = parse_int(val);
+    }
+    if (cfg.gr_idle_promille < 0) cfg.gr_idle_promille = 0;
+    if (cfg.gr_idle_promille > 1000) cfg.gr_idle_promille = 1000;
+    // v4.2: sanity fan — temp_max musi być > temp_min (inaczej krzywa zdegenerowana).
+    if (cfg.fan_temp_max <= cfg.fan_temp_min) {
+        logf(0, "config: fan temp-max <= temp-min (%d <= %d) — koryguję na 40/67",
+             cfg.fan_temp_max, cfg.fan_temp_min);
+        cfg.fan_temp_min = 40; cfg.fan_temp_max = 67;
     }
     return true;
 }
@@ -447,11 +563,111 @@ private:
     int fd_ = -1;
 };
 
+// ----------------------------------------------------------- wentylatory (applesmc)
+// v4.2: sterowanie wentylatorami MacBooka przez SMC applesmc. Dwa wentylatory:
+// fan1 (Lewa), fan2 (Prawa). Zakresy RPM (fanN_min/fanN_max) czytane dynamicznie
+// z sysfs przy starcie — NIE hardkodowane (każde HW ma inny zakres; user chciał
+// "zakresy generowane dynamicznie wg 2ch wartosci" = min/max z sysfs na wentylator).
+//
+// Krzywa temp→RPM: liniowa interpolacja. x = clamp((temp - tmin) / (tmax - tmin))
+// w [0,1]; rpm = fanN_min + round(x * (fanN_max - fanN_min)). temp ≤ tmin → min
+// RPM (najcicho), temp ≥ tmax → max RPM (najgłośniej). Aktualizacja co poll_ms (1 s)
+// — zbieżne z cyklem ankiety hyprctl.
+//
+// Fail-safe: init() zwraca false gdy brak plików applesmc → fan wyłączony bez
+// błędu (demon działa bez sterowania wentylatorami). restore_auto() przy wyjściu
+// zdejmuje manual (fanN_manual=0) → SMC przejmuje auto-kontrolę (reclockd nigdy
+// nie zostawia wentylatorów zablokowanych na manualu po zatrzymaniu).
+
+class Fan {
+public:
+    bool init()
+    {
+        std::string s;
+        std::string base = std::string(FAN_BASE) + "/";
+        if (read_file((base + "fan1_min").c_str(), s) != 0) return false;
+        fan1_min_ = std::atoi(s.c_str());
+        if (read_file((base + "fan1_max").c_str(), s) != 0) return false;
+        fan1_max_ = std::atoi(s.c_str());
+        if (read_file((base + "fan2_min").c_str(), s) != 0) return false;
+        fan2_min_ = std::atoi(s.c_str());
+        if (read_file((base + "fan2_max").c_str(), s) != 0) return false;
+        fan2_max_ = std::atoi(s.c_str());
+        // Sanity: min ≤ max i niezerowe; inaczej fail-safe (nie pisz manual=1).
+        if (fan1_min_ <= 0 || fan1_max_ <= fan1_min_ ||
+            fan2_min_ <= 0 || fan2_max_ <= fan2_min_) {
+            logf(0, "fan: absurdalne zakresy sysfs (f1=%d-%d f2=%d-%d) — wyłączam",
+                 fan1_min_, fan1_max_, fan2_min_, fan2_max_);
+            return false;
+        }
+        ok_ = true;
+        return true;
+    }
+
+    // Ustaw wentylatory wg temp. temp<0 (brak hwmon) → pomiń (zostaw poprzedni stan).
+    // tmin>=tmax (zły config) → clamp do max RPM (bezpieczniej chłodzić).
+    void set(int temp, int tmin, int tmax)
+    {
+        if (!ok_) return;
+        if (temp < 0) return;  // fail-safe: brak temp → nie ruszaj
+        double x;
+        if (tmax <= tmin) x = 1.0;               // zły zakres → max (chłodź)
+        else if (temp <= tmin) x = 0.0;
+        else if (temp >= tmax) x = 1.0;
+        else x = (double)(temp - tmin) / (double)(tmax - tmin);
+        int rpm1 = fan1_min_ + (int)(x * (fan1_max_ - fan1_min_) + 0.5);
+        int rpm2 = fan2_min_ + (int)(x * (fan2_max_ - fan2_min_) + 0.5);
+        write_file((std::string(FAN_BASE) + "/fan1_manual").c_str(), "1");
+        write_file((std::string(FAN_BASE) + "/fan2_manual").c_str(), "1");
+        write_file((std::string(FAN_BASE) + "/fan1_output").c_str(), std::to_string(rpm1));
+        write_file((std::string(FAN_BASE) + "/fan2_output").c_str(), std::to_string(rpm2));
+        last_temp_ = temp; last_rpm1_ = rpm1; last_rpm2_ = rpm2;
+    }
+
+    // Fail-safe: zwróć kontrolę do SMC. Wołane przy wyjściu demona (restore).
+    void restore_auto()
+    {
+        if (!ok_) return;
+        write_file((std::string(FAN_BASE) + "/fan1_manual").c_str(), "0");
+        write_file((std::string(FAN_BASE) + "/fan2_manual").c_str(), "0");
+        logf(1, "fan: restore auto (fanN_manual=0) — SMC przejmuje");
+    }
+
+    bool ok() const { return ok_; }
+    int fan1_min() const { return fan1_min_; }
+    int fan1_max() const { return fan1_max_; }
+    int fan2_min() const { return fan2_min_; }
+    int fan2_max() const { return fan2_max_; }
+    int last_rpm1() const { return last_rpm1_; }
+    int last_rpm2() const { return last_rpm2_; }
+    int last_temp() const { return last_temp_; }
+
+private:
+    bool ok_ = false;
+    int fan1_min_ = 0, fan1_max_ = 0;
+    int fan2_min_ = 0, fan2_max_ = 0;
+    int last_temp_ = -1, last_rpm1_ = 0, last_rpm2_ = 0;
+};
+
+static bool fan_override_active()
+{
+    struct stat st;
+    return stat(FAN_OVERRIDE_FILE, &st) == 0;
+}
+
 static int set_pstate(uint32_t st)
 {
     char buf[8];
     std::snprintf(buf, sizeof buf, "%02x", st);
     return write_file(PSTATE_FILE, buf);
+}
+
+// v4.1: GR-idle gate — czy chwilowy busy (‰ nad ostatni interwal) jest poniżej
+// progu? Używane przed DOWN transycjami (reclok pamięci w locie pod renderem
+// GR wedge'uje silnik). b pochodzi z gpu.sample() (PMU BAR0, reset co sample).
+static bool gr_idle_ok(uint32_t busy_promille)
+{
+    return (int)busy_promille <= g_cfg.gr_idle_promille;
 }
 
 static std::string current_state()
@@ -514,6 +730,38 @@ static void drm_vblank_wait()
 // Prosty ekstraktor pól tekstowych z JSON (bez pełnego parsera; hyprctl daje
 // dobrze uformowany JSON). Znajduje pierwsze wystąpienie "key" i zwraca wartość
 // string po nim.
+//
+// v4.1: poprawna obsługa escape sekwencji JSON (\" \\ \n \t). Wcześniej json_str
+// szukał końcowego `"` przez find('"', k+1) — ucinał łańcuch przy pierwszym
+// `\"` (np. tytuł YouTube z cudzysłowem w nazwie wideo). Teraz skan znak-po-
+// -znaku z unescape. Wspólny helper json_extract_string eliminuje duplikację.
+
+// Skanuje łańcuch JSON zaczynając od otwierającego `"` pod pozycją `q`.
+// Zwraca pozycję zamykającego `"` (lub npos gdy brak) i wypełnia `out`
+// unescaped'ną treścią. Obsługuje \", \\, \n, \t (inne: dosłownie backslash+znak).
+static size_t json_extract_string(const std::string& json, size_t q, std::string& out)
+{
+    out.clear();
+    size_t i = q + 1;
+    while (i < json.size()) {
+        char c = json[i];
+        if (c == '"') return i;            // koniec łańcucha
+        if (c == '\\' && i + 1 < json.size()) {
+            char e = json[i + 1];
+            switch (e) {
+                case '"':  out.push_back('"');  i += 2; continue;
+                case '\\': out.push_back('\\'); i += 2; continue;
+                case 'n':  out.push_back('\n'); i += 2; continue;
+                case 't':  out.push_back('\t'); i += 2; continue;
+                default:   out.push_back('\\'); out.push_back(e); i += 2; continue;
+            }
+        }
+        out.push_back(c);
+        i++;
+    }
+    return std::string::npos;              // brak zamykającego `"` — zwróć co zebrano
+}
+
 static bool json_str(const std::string& json, const std::string& key, std::string& out)
 {
     std::string pat = "\"" + key + "\"";
@@ -523,10 +771,8 @@ static bool json_str(const std::string& json, const std::string& key, std::strin
     if (k == std::string::npos) return false;
     k = json.find('"', k + 1);
     if (k == std::string::npos) return false;
-    size_t end = json.find('"', k + 1);
-    if (end == std::string::npos) return false;
-    out = json.substr(k + 1, end - k - 1);
-    return true;
+    size_t end = json_extract_string(json, k, out);
+    return end != std::string::npos;
 }
 
 static void json_str_all(const std::string& json, const std::string& key,
@@ -539,9 +785,10 @@ static void json_str_all(const std::string& json, const std::string& key,
         if (k == std::string::npos) break;
         k = json.find('"', k + 1);
         if (k == std::string::npos) break;
-        size_t end = json.find('"', k + 1);
+        std::string val;
+        size_t end = json_extract_string(json, k, val);
         if (end == std::string::npos) break;
-        out.push_back(json.substr(k + 1, end - k - 1));
+        out.push_back(val);
         pos = end + 1;
     }
 }
@@ -607,12 +854,16 @@ public:
     }
 
     // Aktywne okno (focus). Zwraca false gdy brak (tty / hyprctl niedostępne).
-    bool activewindow(std::string& cls)
+    // v4.1: zwraca też title (do detekcji Discord/YouTube po tytule — są kartami
+    // w przeglądarce, nie mają własnej klasy okna).
+    bool activewindow(std::string& cls, std::string& title)
     {
         std::string json;
         if (!hyprctl_json("activewindow", json)) return false;
         if (json.find("\"class\"") == std::string::npos) return false; // puste
-        return json_str(json, "class", cls);
+        bool ok = json_str(json, "class", cls);
+        json_str(json, "title", title); // opcjonalne — brak title nie psuje class
+        return ok;
     }
 
     // Wszystkie uruchomione clienci (class). Zwraca false gdy niedostępne.
@@ -652,7 +903,7 @@ static std::string override_content()
 static void usage(const char* argv0)
 {
     std::printf(
-        "reclockd v4 — polityka profilowa (app-aware) + override + reload\n"
+        "reclockd v4.3 — polityka profilowa (app-aware) + wentylatory + override + reload\n"
         "Użycie: %s [opcje]\n"
         "  Profile: default (cap 07) ↔ preferred (cap 0e).\n"
         "  Bezpieczna drabinka AUTO: 07 ↔ 0a ↔ 0e. 0f = BOOST TIER nad drabinką\n"
@@ -812,6 +1063,8 @@ int main(int argc, char** argv)
     }
     if (g_cfg.interval_ms <= 0) g_cfg.interval_ms = 200;
     if (g_cfg.poll_ms < g_cfg.interval_ms) g_cfg.poll_ms = g_cfg.interval_ms;
+    if (g_cfg.gr_idle_promille < 0) g_cfg.gr_idle_promille = 0;
+    if (g_cfg.gr_idle_promille > 1000) g_cfg.gr_idle_promille = 1000;
 
     Gpu gpu;
     if (!gpu.open_mmio()) return 1;
@@ -836,6 +1089,21 @@ int main(int argc, char** argv)
     if (!hw_ok)
         logf(0, "UWAGA: hwmon nouveau niedostępny — warunki termalne pominięte (fail-safe)");
 
+    // v4.2: wentylatory applesmc. init czyta fanN_min/max dynamicznie z sysfs.
+    Fan fan;
+    bool fan_ok = false;
+    if (g_cfg.fan_enable) {
+        fan_ok = fan.init();
+        if (fan_ok)
+            logf(1, "fan: applesmc OK — fan1=%d-%d RPM, fan2=%d-%d RPM, krzywa %d-%d°C",
+                 fan.fan1_min(), fan.fan1_max(), fan.fan2_min(), fan.fan2_max(),
+                 g_cfg.fan_temp_min, g_cfg.fan_temp_max);
+        else
+            logf(0, "UWAGA: applesmc niedostępny — sterowanie wentylatorami wyłączone (fail-safe)");
+    } else {
+        logf(1, "fan: wyłączony w configu (enable=false)");
+    }
+
     std::string old_pm;
     bool pm_saved = read_file(POWER_CTRL, old_pm) == 0;
     if (pm_saved) write_file(POWER_CTRL, "on");
@@ -845,6 +1113,8 @@ int main(int argc, char** argv)
             if (set_pstate((uint32_t)g_cfg.exit_state) == 0)
                 logf(1, "wyjście: pstate -> %s", state_hex(g_cfg.exit_state));
         }
+        // v4.2: zwróć wentylatory do auto SMC (fail-safe — nie zostawiaj manual).
+        if (fan_ok) fan.restore_auto();
         if (pm_saved) write_file(POWER_CTRL, old_pm);
     };
     std::signal(SIGINT, on_term);
@@ -901,15 +1171,21 @@ int main(int argc, char** argv)
     int poll_cycles = std::max(1, g_cfg.poll_ms / g_cfg.interval_ms);
     int cycle = 0;
     std::string focused_class;
+    std::string focused_title;   // v4.1: do detekcji Discord/YouTube po tytule
     std::vector<std::string> running_classes;
     bool hypr_alive = hypr_ok;
+    // v4.2: poprzednie RPM do logowania zmian (poziom 1) vs co-1s log (poziom 2).
+    int prev_fan_rpm1 = -1, prev_fan_rpm2 = -1;
+    bool prev_fan_override = false;
 
-    logf(1, "start v4: interval=%dms poll=%dms, "
+    logf(1, "start v4.3: interval=%dms poll=%dms, "
             "default[cap=%s temp-up=%d temp-down=%d], "
             "preferred[cap=%s boost=%s busy-boost=%d%% boost-dwell=%dms "
             "temp-up=%d temp-down=%d], "
             "busy-up=%d%% busy-down=%d%%, temp-dwell=%dms idle-dwell=%dms, "
-            "profile-dwell=%dms, hwmon=%s, hypr=%s, vblank=%d, stan=%s",
+            "profile-dwell=%dms, hwmon=%s, hypr=%s, vblank=%d, "
+            "gr-idle=%d‰, preferred-titles=%zu, low-power=%zu, "
+            "fan=%s temp[%d-%d] fan1[%d-%d] fan2[%d-%d], stan=%s",
          g_cfg.interval_ms, g_cfg.poll_ms,
          state_hex(g_cfg.def.max_pstate), g_cfg.def.temp_up, g_cfg.def.temp_down,
          state_hex(g_cfg.preferred.max_pstate),
@@ -920,6 +1196,11 @@ int main(int argc, char** argv)
          g_cfg.profile_dwell_ms,
          hw_ok ? hw.path().c_str() : "BRAK",
          hypr_ok ? "tak" : "nie", g_cfg.vblank_sync ? 1 : 0,
+         g_cfg.gr_idle_promille,
+         g_cfg.preferred_titles.size(), g_cfg.low_power_classes.size(),
+         fan_ok ? "tak" : (g_cfg.fan_enable ? "BRAK" : "off"),
+         g_cfg.fan_temp_min, g_cfg.fan_temp_max,
+         fan.fan1_min(), fan.fan1_max(), fan.fan2_min(), fan.fan2_max(),
          cur.c_str());
 
     const int busy_up_pp   = g_cfg.busy_up   * 10;
@@ -961,6 +1242,37 @@ int main(int argc, char** argv)
         uint32_t busy_avg = ring.avg(); // ‰
         int temp = hw.read_temp();
 
+        // v4.3: title-match (Discord/YouTube po tytule okna) = najwyższy priorytet
+        // sygnału preferred. Ustawiane w sekcji pref_sig poniżej; reset co cykl.
+        // Gdy true: UP do ceiling bez busy-gate + suppress IDLE downshift (TERMAL
+        // zostaje — termalne > title). Patrz UP-LOAD i IDLE DOWN.
+        bool title_pref = false;
+
+        // v4.2: wentylatory applesmc — aktualizacja co poll_ms (1 s), niezależnie
+        // od pstate (wentylatory działają nawet gdy pstate override zamraża zegary).
+        // fan-override flag-file (/run/reclockd/fan-override) zamraża auto wentyl.
+        // — wtedy użytkownik steruje ręcznie (cusfan.sh / fullfan.sh).
+        if (fan_ok && g_cfg.fan_enable && (cycle % poll_cycles) == 0) {
+            bool fov = fan_override_active();
+            if (fov && !prev_fan_override)
+                logf(1, "fan-override AKTYWNY: hold wentylatorów (flag=/run/reclockd/fan-override)");
+            if (!fov && prev_fan_override)
+                logf(1, "fan-override ZDJĘTY — wznawiam auto wentylatorów");
+            prev_fan_override = fov;
+            if (!fov) {
+                fan.set(temp, g_cfg.fan_temp_min, g_cfg.fan_temp_max);
+                int r1 = fan.last_rpm1(), r2 = fan.last_rpm2();
+                if (r1 != prev_fan_rpm1 || r2 != prev_fan_rpm2) {
+                    logf(1, "fan: temp=%d°C -> fan1=%d fan2=%d RPM (krzywa %d-%d°C)",
+                         temp, r1, r2, g_cfg.fan_temp_min, g_cfg.fan_temp_max);
+                    prev_fan_rpm1 = r1; prev_fan_rpm2 = r2;
+                } else if (g_cfg.verbosity >= 2) {
+                    logf(2, "fan: temp=%d°C fan1=%d fan2=%d RPM (bez zmian)",
+                         temp, r1, r2);
+                }
+            }
+        }
+
         // Override flag-file — zamraża auto.
         bool ov = override_active();
         if (ov && !prev_override) {
@@ -986,31 +1298,59 @@ int main(int argc, char** argv)
         }
 
         // Polling hyprctl co poll_cycles.
-        if (hypr_alive && (cycle % poll_cycles) == 0) {
-            std::string fcs;
-            std::vector<std::string> rcs;
-            bool a1 = hypr.activewindow(fcs);
-            bool a2 = hypr.clients(rcs);
-            if (a1) focused_class = fcs; else focused_class.clear();
-            if (a2) running_classes = rcs; else running_classes.clear();
-            // Jeśli oba zawiodły — może Hyprland zrestartowany. Re-detect.
-            if (!a1 && !a2) {
-                logf(0, "hyprctl niedostępny — re-detect instancji");
+        // v4.1 Bug-fix: gdy !hypr_alive (daemon startował przed sesją Hyprlanda
+        // — typowe dla usługi systemd), cyklicznie re-detect co poll_ms. Wcześniej
+        // blok był zgated `if (hypr_alive && ...)` — gdy start zawiodło, re-detect
+        // nigdy nie odpalał i demon zostawał na default cap=07 na całą sesję.
+        if ((cycle % poll_cycles) == 0) {
+            if (hypr_alive) {
+                std::string fcs, ftitle;
+                std::vector<std::string> rcs;
+                bool a1 = hypr.activewindow(fcs, ftitle);
+                bool a2 = hypr.clients(rcs);
+                if (a1) { focused_class = fcs; focused_title = ftitle; }
+                else    { focused_class.clear(); focused_title.clear(); }
+                if (a2) running_classes = rcs; else running_classes.clear();
+                // Jeśli oba zawiodły — może Hyprland zrestartowany. Re-detect.
+                if (!a1 && !a2) {
+                    logf(0, "hyprctl niedostępny — re-detect instancji");
+                    if (hypr.detect()) {
+                        hypr.apply_env();
+                        logf(1, "hyprctl re-detected: uid=%d HIS=%s",
+                             hypr.uid(), hypr.his().c_str());
+                    } else {
+                        hypr_alive = false;
+                        logf(0, "Hyprland zniknął — fallback do default");
+                    }
+                }
+            } else {
+                // !hypr_alive: cykliczny re-detect (sesja może wstać po starcie demona).
                 if (hypr.detect()) {
                     hypr.apply_env();
-                    logf(1, "hyprctl re-detected: uid=%d HIS=%s",
+                    hypr_alive = true;
+                    logf(1, "hyprctl detected: uid=%d HIS=%s (sesja gotowa)",
                          hypr.uid(), hypr.his().c_str());
-                } else {
-                    hypr_alive = false;
-                    logf(0, "Hyprland zniknął — fallback do default");
+                    // Natychmiastowy poll tego cyklu — pref_sig nie czeka kolejny poll_ms.
+                    std::string fcs, ftitle;
+                    std::vector<std::string> rcs;
+                    if (hypr.activewindow(fcs, ftitle)) { focused_class = fcs; focused_title = ftitle; }
+                    if (hypr.clients(rcs)) running_classes = rcs;
                 }
+                // else: zostań !hypr_alive, retry next poll_ms.
             }
         }
         cycle++;
 
         // Sygnał preferred.
+        // v4.1: low-power gate — gdy okno z focusem to terminal (klasa ∈
+        // low_power_classes), wymuś default (cap=07) z priorytetem nad preferred.
+        // Nawet jeśli Discord/YouTube generuje busy w tle (running-busy), terminal
+        // z focusem trzyma 07.
+        bool low_power_focused = hypr_alive && !focused_class.empty() &&
+                                 g_cfg.low_power_classes.count(focused_class) > 0;
+
         bool pref_sig = false;
-        if (hypr_alive) {
+        if (hypr_alive && !low_power_focused) {
             // focused ∈ lista?
             if (!focused_class.empty() &&
                 g_cfg.preferred_classes.count(focused_class))
@@ -1021,14 +1361,24 @@ int main(int argc, char** argv)
                     if (g_cfg.preferred_classes.count(r)) { pref_sig = true; break; }
                 }
             }
+            // v4.1: focused.title zawiera wzorzec z preferred_titles? (Discord/YouTube
+            // są kartami w przeglądarce — detekcja po tytule okna, case-insensitive.)
+            // v4.3: title-match ma NAJWYŻSZY priorytet — ustawia title_pref=true, co
+            // wymusza UP do ceiling bez busy-gate i suppress IDLE (patrz UP-LOAD/IDLE).
+            if (!focused_title.empty()) {
+                for (auto& t : g_cfg.preferred_titles) {
+                    if (icontains(focused_title, t)) { pref_sig = true; title_pref = true; break; }
+                }
+            }
         }
         if (pref_sig) { pref_dwell += g_cfg.interval_ms; def_dwell = 0; }
         else          { def_dwell += g_cfg.interval_ms; pref_dwell = 0; }
 
         if (!pref_active && pref_dwell >= g_cfg.profile_dwell_ms) {
             pref_active = true; pref_dwell = 0;
-            logf(1, "profil -> PREFERRED (focused=%s, busy=%.0f%%)",
-                 focused_class.c_str(), busy_avg/10.0f);
+            logf(1, "profil -> PREFERRED (focused=%s, title=%s, busy=%.0f%%, title-pref=%s)",
+                 focused_class.c_str(), focused_title.c_str(), busy_avg/10.0f,
+                 title_pref ? "TAK" : "nie");
         } else if (pref_active && def_dwell >= g_cfg.profile_dwell_ms) {
             pref_active = false; def_dwell = 0;
             logf(1, "profil -> DEFAULT (def_dwell=%dms)", g_cfg.profile_dwell_ms);
@@ -1060,6 +1410,12 @@ int main(int argc, char** argv)
         // Jeśli bieżący stan poza drabinką (np. 0a, boot) → wymuś przejście
         // na najniższy (07) w następnym kroku decyzji.
         if (g_cur_idx < 0) {
+            // v4.1: init to DOWN do 07 — gate'owane GR-idle (init mid-render ryzykowne).
+            if (!g_cfg.dry && !gr_idle_ok(b)) {
+                logf(2, "GR-idle gate: defer init -> 07 (busy=%d%% > %d%%)",
+                     b / 10, g_cfg.gr_idle_promille / 10);
+                continue;
+            }
             if (!g_cfg.dry) {
                 if (g_cfg.vblank_sync) drm_vblank_wait();
                 if (set_pstate(LADDER[0]) == 0) {
@@ -1077,6 +1433,10 @@ int main(int argc, char** argv)
         int target = g_cur_idx;
         const char* reason = nullptr;
         bool next_boost = g_boost_active;
+        // v4.1: czy ta transycja wymaga GR-idle przed zapisem? DOWN (spadek zegara
+        // pamięci) = true (ryzyko wedge'a GR mid-render); UP-LOAD/BOOST-UP = false
+        // (rosnący zegar bezpieczniejszy; UP wymaga busy>80% więc gate blokowałby).
+        bool needs_gr_idle = false;
 
         // ---- BOOST TIER (0f) — nad drabinką, straż termiczna priorytetowa ----
         if (g_boost_active) {
@@ -1087,6 +1447,7 @@ int main(int argc, char** argv)
                 next_boost = false;
                 target = std::min(ceiling, LADDER_N - 1); // powrót na 0e (lub niżej)
                 reason = "BOOST-TERMAL";
+                needs_gr_idle = true;            // DOWN z 0f
             }
             // EXIT boost — CEILING: profil obniżył cap poniżej szczytu drabinki
             // (np. preferred→default). Zejdź z 0f na nowy ceiling.
@@ -1094,6 +1455,7 @@ int main(int argc, char** argv)
                 next_boost = false;
                 target = std::min(ceiling, LADDER_N - 1);
                 reason = "BOOST-CEILING";
+                needs_gr_idle = true;            // DOWN z 0f
             }
             // EXIT boost — LOAD histereza: busy < busy_up (80%) → drop z 0f.
             // Histereza enter@busy_boost(85) / exit@busy_up(80) = pasmo 5 pp.
@@ -1101,6 +1463,7 @@ int main(int argc, char** argv)
                 next_boost = false;
                 target = g_cur_idx; // == ceiling, powrót na 0e
                 reason = "BOOST-IDLE";
+                needs_gr_idle = true;            // DOWN z 0f
             }
             // else: boost hold — zostajemy na 0f.
         }
@@ -1115,6 +1478,7 @@ int main(int argc, char** argv)
             next_boost = true;
             target = g_cur_idx; // g_cur_idx zostaje na ceiling; pstate=0f niżej
             reason = "BOOST-UP";
+            // UP do 0f — NIE gate'owane (wymaga busy>busy_boost; rosnący zegar).
         }
 
         // ---- LADDER (drabinka 07↔0a↔0e) — tylko gdy boost niezmieniony ----
@@ -1125,23 +1489,39 @@ int main(int argc, char** argv)
             if (temp >= 0 && temp_high_dwell >= g_cfg.temp_dwell_ms && g_cur_idx > 0) {
                 target = g_cur_idx - 1;
                 reason = "TERMAL";
-            } else if (g_cur_idx > 0 && idle_dwell >= g_cfg.idle_dwell_ms) {
+                needs_gr_idle = true;            // DOWN
+            } else if (g_cur_idx > 0 && idle_dwell >= g_cfg.idle_dwell_ms &&
+                       !title_pref) {
+                // v4.3: !title_pref — suppress IDLE downshift gdy title-match
+                // (Discord/YouTube z focusem trzyma ceiling 0e; spadek z powodu
+                // niskiego busy jest niepożądany — to memory-bound apki, GR idle
+                // ≠ brak potrzeby zegara pamięci). TERMAL DOWN (wyżej) zostaje —
+                // ochrona termiczna > priorytet tytułu.
                 target = g_cur_idx - 1;
                 reason = "IDLE";
+                needs_gr_idle = true;            // DOWN
             } else if (g_cur_idx > ceiling) {
                 // Profil obniżył ceiling poniżej bieżącego — zjedź krok w dół
                 // (dwell idle/termal załatwi resztę; skrót gdy ceiling twardo
                 // blokuje obecny poziom, np. default cap=07 a jesteśmy na 0a/0e).
                 target = g_cur_idx - 1;
                 reason = "CEILING";
+                needs_gr_idle = true;            // DOWN
             }
             // UP (o 1 poziom, nigdy skok 07→0e). Wspólne progi load/temp dla obu
             // kroków 07→0a i 0a→0e.
+            // v4.3: title_pref omija busy_up — Discord/YouTube są memory-bound (GR
+            // busy 16-36%, nigdy >80%), więc bez tej ścieżki utykały na 0a. Gdy
+            // title-match AND temp<temp_up przez dwell AND poniżej ceiling → UP bez
+            // busy-gate. UP pozostaje NIE gate'owane GR-idle (rosnący zegar pamięci
+            // bezpieczniejszy niż spadający, Kepler toleruje UP mid-render).
             else if (g_cur_idx < ceiling &&
                      temp >= 0 && temp_low_dwell >= g_cfg.temp_dwell_ms &&
-                     (int)busy_avg > busy_up_pp) {
+                     ((int)busy_avg > busy_up_pp || title_pref)) {
                 target = g_cur_idx + 1;
-                reason = "UP-LOAD";
+                reason = title_pref ? "UP-TITLE" : "UP-LOAD";
+                // UP — NIE gate'owane (wymaga busy>busy_up LUB title_pref; rosnący
+                // zegar pamięci bezpieczniejszy niż spadający).
             }
         }
 
@@ -1152,6 +1532,22 @@ int main(int argc, char** argv)
             return g_boost_active ? state_hex((uint32_t)prof.boost_pstate)
                                   : state_hex(LADDER[g_cur_idx]);
         };
+
+        // v4.1: GR-idle gate dla DOWN transycji. Jeśli silnik GR zajęty
+        // (busy > gr_idle_promille) — odroczy zapis o jeden cykl. NIE resetuj
+        // dwell-counters / g_cur_idx / g_boost_active (defer ≠ wykonana transycja;
+        // dwell rośnie dalej, transycja wykonana gdy busy dolinie w dolinie między
+        // klatkami). UP-LOAD/BOOST-UP mają needs_gr_idle=false → nie deferowane.
+        const bool defer = needs_gr_idle && !gr_idle_ok(b);
+        if (defer) {
+            const char* tgt = next_boost ? state_hex((uint32_t)prof.boost_pstate)
+                             : (target >= 0 && target < LADDER_N
+                                ? state_hex(LADDER[target]) : "?");
+            logf(2, "GR-idle gate: defer %s %s->%s (busy=%d%% > %d%%)",
+                 reason ? reason : "?", cur_hex(), tgt,
+                 b / 10, g_cfg.gr_idle_promille / 10);
+            continue;
+        }
 
         if (boost_changed) {
             uint32_t write_state = next_boost

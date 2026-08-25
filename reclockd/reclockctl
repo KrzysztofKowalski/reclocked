@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # reclockctl — wrapper kontroli daemona reclockd (systemd)
-# Użycie: reclockctl {start|stop|status|restart|reload|logs}
+# Użycie: reclockctl {start|stop|status|restart|reload|logs|fan-on|fan-off}
 #   start   — systemctl start reclockd
-#   stop    — systemctl stop reclockd (SIGTERM → restore exit-state)
-#   status  — systemctl status reclockd + pstate.sh status
+#   stop    — systemctl stop reclockd (SIGTERM → restore exit-state + fan auto)
+#   status  — systemctl status reclockd + pstate.sh status + wentylatory
 #   restart — systemctl restart reclockd
 #   reload  — systemctl kill -s HUP reclockd (re-read configu bez restartu)
 #   logs    — journalctl -u reclockd -f
+#   fan-on  — usuń flag-file fan-override (daemon przejmuje auto wentylatorów)
+#   fan-off — utwórz flag-file fan-override (zamroź auto; steruj ręcznie przez sysfs)
 
 set -e
 CMD="${1:-status}"
@@ -24,6 +26,17 @@ case "$CMD" in
     sudo -n systemctl status reclockd --no-pager 2>&1 || true
     echo "---"
     pstate.sh status
+    echo "--- wentylatory (applesmc) ---"
+    fb="/sys/devices/platform/applesmc.768"
+    for n in 1 2; do
+      printf "fan%s: %s RPM (cel=%s, manual=%s, zakres %s-%s)\n" "$n" \
+        "$(cat $fb/fan${n}_input 2>/dev/null || echo '?')" \
+        "$(cat $fb/fan${n}_output 2>/dev/null || echo '?')" \
+        "$(cat $fb/fan${n}_manual 2>/dev/null || echo '?')" \
+        "$(cat $fb/fan${n}_min 2>/dev/null || echo '?')" \
+        "$(cat $fb/fan${n}_max 2>/dev/null || echo '?')"
+    done
+    [ -f /run/reclockd/fan-override ] && echo "fan-override: AKTYWNY (auto zamrożone)" || echo "fan-override: brak (auto)"
     ;;
   restart)
     sudo -n systemctl restart reclockd
@@ -33,23 +46,34 @@ case "$CMD" in
     sudo -n systemctl kill -s HUP reclockd
     echo "SIGHUP wysłany — daemon re-readuje config (/etc/reclockd.conf)"
     ;;
+  fan-off)
+    sudo -n mkdir -p /run/reclockd
+    sudo -n touch /run/reclockd/fan-override
+    echo "fan-override UTWORZONY — auto wentylatorów zamrożone (steruj ręcznie: fanN_manual=1 + fanN_output w sysfs)"
+    ;;
+  fan-on)
+    sudo -n rm -f /run/reclockd/fan-override
+    echo "fan-override ZDJĘTY — daemon przejmuje auto wentylatorów"
+    ;;
   logs)
     sudo -n journalctl -u reclockd -f --no-pager
     ;;
   -h|--help|help)
     cat <<'EOF'
-reclockctl {start|stop|status|restart|reload|logs}
+reclockctl {start|stop|status|restart|reload|logs|fan-on|fan-off}
   start   — uruchom daemon
-  stop    — zatrzymaj (restore exit-state)
-  status  — status systemd + pstate
+  stop    — zatrzymaj (restore exit-state + fan auto)
+  status  — status systemd + pstate + wentylatory
   restart — restart
   reload  — SIGHUP (re-read configu bez restartu)
   logs    — journalctl -f
+  fan-on  — zdejmij fan-override (daemon auto wentylatorów)
+  fan-off — fan-override (zamroź auto; steruj ręcznie)
 EOF
     ;;
   *)
     echo "Nieznana komenda: $CMD" >&2
-    echo "Użycie: reclockctl {start|stop|status|restart|reload|logs}" >&2
+    echo "Użycie: reclockctl {start|stop|status|restart|reload|logs|fan-on|fan-off}" >&2
     exit 1
     ;;
 esac
