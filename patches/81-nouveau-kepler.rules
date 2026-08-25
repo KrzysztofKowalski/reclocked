@@ -1,0 +1,8 @@
+# nv-kepler: wymuszone ładowanie nouveau dla GT 750M (GK107, 10de:0fe9)
+# Pakiet nvidia-utils (twarda zależność Hyprlanda/Omarchy) dostarcza
+# /usr/lib/modprobe.d/nvidia-utils.conf z "blacklist nouveau". Moduł bloba
+# nvidia NIE jest zainstalowany, więc blacklist tylko blokuje nasz sterownik
+# dGPU. Dyrektywa blacklist powstrzymuje auto-load przez alias PCI, ale NIE
+# blokuje jawnego wywołania modprobe po nazwie modułu — dlatego ta reguła
+# działa. Po update nvidia-utils blacklist wraca, ale ta reguła zostaje.
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{device}=="0x0fe9", RUN+="/sbin/modprobe nouveau"

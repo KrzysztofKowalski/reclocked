@@ -198,7 +198,9 @@ reclocked/
 │   └── reclockctl                  wrapper CLI dla systemctl + pstate.sh
 ├── patches/
 │   ├── 0001-nouveau-auto-reclock.patch   polityka auto-reclocku w jądrze nouveau
-│   └── 0002-mesa-nvc0-sched-data.patch   dane latencji schedulera Mesa nvc0
+│   ├── 0002-mesa-nvc0-sched-data.patch   dane latencji schedulera Mesa nvc0
+│   └── 81-nouveau-kepler.rules           reguła udev: wymuś nouveau (omija blacklist nvidia-utils)
+├── install-udev-rule.sh            instaluje powyższą regułę udev
 ├── pstate.sh                       inspekcja/wymuszanie pstate przez debugfs (+ override)
 ├── build-mesa.sh                   budowanie patchowanego Mesa (tylko nouveau)
 ├── mesa-manage.sh                  instalacja/rollback patchowanego sterownika Mesa
@@ -420,6 +422,28 @@ shader-bound na Keplerze: około +10-30%. Aplikuj na drzewo źródłowe Mesa (pa
 ```sh
 cd /path/to/mesa
 patch -p1 < /path/to/0002-mesa-nvc0-sched-data.patch
+```
+
+### `patches/81-nouveau-kepler.rules` + `install-udev-rule.sh`
+
+Reguła udev, która wymusza załadowanie modułu `nouveau` dla GT 750M (GK107, PCI
+`10de:0fe9`) przy booście. Obchodzi pułapkę na Omarchy/Arch: `nvidia-utils` —
+twarda zależność Hyprlanda i aquamarine — dostarcza
+`/usr/lib/modprobe.d/nvidia-utils.conf` z `blacklist nouveau`, nawet gdy
+proprietarny moduł `nvidia` **nie** jest zainstalowany. Blacklist blokuje
+auto-load przez alias PCI, więc dGPU wstaje bez sterownika,
+`/sys/kernel/debug/dri/*/pstate` nie istnieje, a `reclockd` kręci się w pustym.
+Jawne `modprobe nouveau` po nazwie modułu omija blacklist (blokuje tylko
+auto-load przez alias) — właśnie to ta reguła udev wywołuje przy dodaniu
+urządzenia. Reguła przetrwa aktualizacje `nvidia-utils`, bo leży w `/etc`
+(nadpisuje `/usr/lib`). Instalacja:
+
+```sh
+sudo ./install-udev-rule.sh
+# albo ręcznie:
+sudo install -m644 patches/81-nouveau-kepler.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+# reboot, albo natychmiast: sudo modprobe nouveau
 ```
 
 ---
