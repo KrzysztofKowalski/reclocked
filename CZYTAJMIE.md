@@ -370,6 +370,28 @@ discord = floor=0a, max=0e, busy-up=50
 chrome-discord.com__channels_@me-Default = floor=0a, max=0e, busy-up=50
 ```
 
+### 🛡 Samouzdrawianie po suspend/resume (v4.5)
+
+Głęboki sleep (S3) odcina zasilanie GPU. Po resume nouveau robi pełny
+`devinit`, ale konfiguracja liczników busy PMU w BAR0 (`R_IDLE_CTRL` /
+`R_IDLE_MASK`) **nie wraca** — `reclockd` inicjuje ją raz przy starcie
+(`init_counters()`). Bez niej `sample()` zwraca stale 1000‰, co blokuje
+zejście IDLE i GR-idle gate, zostawiając daemon w `0e` (raport 63).
+
+v4.5 samo-leczy się: pętla główna odczytuje `R_IDLE_CTRL` co cykl; gdy
+`(ctrl & CTRL_VALUE_MASK) != CTRL_VALUE_ALWAYS` (konfiguracja stracona —
+typowo po resume), ponownie inicjuje liczniki, resetuje okno busy i loguje
+`PMU busy counters config lost (post-resume?) — reinitializing`.
+
+Hook `system-sleep` jest siatką bezpieczeństwa:
+`/usr/lib/systemd/system-sleep/reclockd-resume` restartuje daemon w fazie
+`post`, resynchronizując liczniki i indeks pstate. Razem zapobiegają lockupowi
+w `0e` po sleepie. Bez zmian w konfiguracji.
+
+**Weryfikacja po `systemctl suspend`:** `reclockctl status` powinien wrócić
+do `07` (nie utknąć na `0e`), MainPID daemona powinien być nowy (restart
+z hooka), a `journalctl -u reclockd -n 50` może pokazać log reinitu.
+
 ### Sekcja `[low-power]`
 
 Klasy okien, które wymuszają profil `default` (cap `07`) z priorytetem nad
