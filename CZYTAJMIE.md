@@ -147,6 +147,15 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
   drabiny (`0e`) pod utrzymanym busy > `busy-boost` przez `boost-dwell` z
   temp < `temp-up`, a zabezpieczenie termiczne zrzuca go natychmiast.
   Zawieszenia NVE0 przy max pstate są znane.
+- 🎯 **Per-klasowa polityka `[caps]` (v4.4)**: per-klasowe `floor` / `max` /
+  `busy-up` (`klasa = floor=0a, max=0e, busy-up=50`) — `floor` = stan
+  spoczynkowy (IDLE nie schodzi niżej), `max` = własny sufit, `busy-up` =
+  własny próg UP-LOAD (0 = globalny 80 %). Klasa z wpisem `[caps]` jest
+  *preferred, gdy ma focus*, ale **nie** łapie title-priority — karta Discord
+  w przeglądarce (chromium/firefox, bez wpisu w `[caps]`) nadal dostaje
+  force-`0e` po tytule. Przykład: desktop Discord — baza `0a`, busy > 50 % →
+  `0e`, idle → z powrotem `0a`. TERMAL pozostaje nadrzędny (może zejść poniżej
+  `floor`).
 - 🌡 **Per-profil zabezpieczenie termiczne**: downclock termiczny jest
   **per-profil**, a nie globalny. `default` obniża taktowanie przy 65°C /
   odzyskuje poniżej 58°C; `preferred` obniża przy 82°C / odzyskuje poniżej
@@ -232,7 +241,7 @@ reclocked/
 ├── CZYTAJMIE.md                    ten plik (PL)
 ├── .gitignore
 ├── reclockd/
-│   ├── reclockd.cpp                źródło demona (~1600 linii, C++17)
+│   ├── reclockd.cpp                źródło demona (~1690 linii, C++17)
 │   ├── Makefile                    buduje ./reclockd (bez linkowania libdrm)
 │   ├── reclockd.conf               domyślny config (profile, progi)
 │   ├── reclockd.service            jednostka systemd (instaluje się do /etc/systemd/system/)
@@ -240,7 +249,9 @@ reclocked/
 ├── patches/
 │   ├── 0001-nouveau-auto-reclock.patch   polityka auto-reclocku w jądrze nouveau
 │   ├── 0002-mesa-nvc0-sched-data.patch   dane latencji schedulera Mesa nvc0
-│   └── 81-nouveau-kepler.rules           reguła udev: wymuś nouveau (omija blacklist nvidia-utils)
+│   ├── 0003-reclockd-caps-ceiling.patch  reclockd v4.4 polityka per-klasowa [caps]
+│   ├── 81-nouveau-kepler.rules           reguła udev: wymuś nouveau (omija blacklist nvidia-utils)
+│   └── reclockd.conf-caps.diff           diff reclockd.conf — [caps] Discord 0a/0e busy-gated
 ├── install-udev-rule.sh            instaluje powyższą regułę udev
 ├── pstate.sh                       inspekcja/wymuszanie pstate przez debugfs (+ override)
 ├── build-mesa.sh                   budowanie patchowanego Mesa (tylko nouveau)
@@ -324,6 +335,32 @@ profil `preferred` z **title-priority** — wymuszając `0e` z pominięciem regu
 `busy > busy-up`. Używaj dla kart w przeglądarce, które nie mają własnej klasy
 okna (Discord, YouTube). Przy matchu IDLE downshift jest suppressowany, więc
 apka trzyma `0e`. Przykład: `Discord`, `YouTube`, ` - YouTube`.
+
+### Sekcja `[caps]` — polityka per-klasowa
+
+Per-klasowe floor / sufit / próg UP-LOAD dla aplikacji z prawdziwą klasą okna
+(Electron, PWA Chrome). Składnia: `klasa = floor=0a, max=0e, busy-up=50`
+(każdy klucz opcjonalny):
+
+| Klucz | Domyślnie | Znaczenie |
+|---|---|---|
+| `floor` | `-` (brak) | Stan spoczynkowy — IDLE nie schodzi poniżej tego stanu drabiny. |
+| `max` | sufit profilu | Własny sufit (stan drabiny), nadpisuje cap profilu. |
+| `busy-up` | `0` (globalne 80) | Własny próg UP-LOAD (%). `0` = globalne `busy-up`. |
+
+Klasa z wpisem `[caps]` zachowuje się jak `[preferred]` **gdy ma focus**, ale
+**nie** jest dopasowywana przez `[preferred-titles]` — bez force-`0e` po tytule.
+Używaj dla desktopowego Discorda — obie możliwe klasy (Electron `discord`, PWA
+`chrome-discord.com__channels_@me-Default`) dostają tę samą politykę: baza `0a`,
+busy > 50 % → `0e`, idle → z powrotem `0a`. TERMAL pozostaje najwyższy (może
+zejść poniżej `floor`). Karta Discord w przeglądarce bez wpisu w `[caps]`
+zachowuje ścieżkę force-`0e` po tytule bez zmian.
+
+```ini
+[caps]
+discord = floor=0a, max=0e, busy-up=50
+chrome-discord.com__channels_@me-Default = floor=0a, max=0e, busy-up=50
+```
 
 ### Sekcja `[low-power]`
 

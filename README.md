@@ -138,6 +138,15 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   `reclockd.conf`: it only engages at the ladder ceiling (`0e`) under
   sustained busy > `busy-boost` for `boost-dwell` with temp < `temp-up`, and
   the thermal guard drops it instantly. NVE0 lockups at max pstate are known.
+- 🎯 **Per-class `[caps]` policy (v4.4)**: a per-class `floor` / `max` /
+  `busy-up` (`class = floor=0a, max=0e, busy-up=50`) — `floor` = resting state
+  (IDLE never goes below), `max` = own ceiling, `busy-up` = own UP-LOAD
+  threshold (0 = the global 80 %). A class with a `[caps]` entry is
+  *preferred while focused* but is **not** caught by title-priority — a
+  Discord *tab* in a browser (chromium/firefox, not in `[caps]`) still gets the
+  force-`0e` title path. Example — Desktop Discord: base `0a`, busy > 50 % →
+  `0e`, idle → back to `0a`. TERMAL remains top priority (may drop below
+  `floor`).
 - 🌡 **Per-profile thermal guard**: thermal downclock is **per-profile**, not
   global. `default` throttles at 65°C / recovers below 58°C; `preferred`
   throttles at 82°C / recovers below 75°C. Thermal down is prioritized over
@@ -215,7 +224,7 @@ reclocked/
 ├── README.md                       this file
 ├── .gitignore
 ├── reclockd/
-│   ├── reclockd.cpp                daemon source (~1600 lines, C++17)
+│   ├── reclockd.cpp                daemon source (~1690 lines, C++17)
 │   ├── Makefile                    builds ./reclockd (no libdrm link)
 │   ├── reclockd.conf               default config (profiles, thresholds)
 │   ├── reclockd.service            systemd unit (installs to /etc/systemd/system/)
@@ -223,7 +232,9 @@ reclocked/
 ├── patches/
 │   ├── 0001-nouveau-auto-reclock.patch   nouveau kernel auto-reclock policy
 │   ├── 0002-mesa-nvc0-sched-data.patch   Mesa nvc0 scheduler latency data
-│   └── 81-nouveau-kepler.rules           udev rule: force-load nouveau (bypass nvidia-utils blacklist)
+│   ├── 0003-reclockd-caps-ceiling.patch  reclockd v4.4 per-class [caps] policy
+│   ├── 81-nouveau-kepler.rules           udev rule: force-load nouveau (bypass nvidia-utils blacklist)
+│   └── reclockd.conf-caps.diff           reclockd.conf diff — [caps] Discord 0a/0e busy-gated
 ├── install-udev-rule.sh            installs the udev rule above
 ├── pstate.sh                       inspect/force pstate via debugfs (+ override)
 ├── build-mesa.sh                   build patched Mesa (nouveau-only)
@@ -306,6 +317,32 @@ Window **titles** (case-insensitive substring match) that trigger the
 `busy > busy-up` rule. Use this for browser tabs that have no window class of
 their own (Discord, YouTube). On match, IDLE downshift is also suppressed so
 the app holds `0e`. Example: `Discord`, `YouTube`, ` - YouTube`.
+
+### `[caps]` section — per-class policy
+
+Per-class floor / ceiling / UP-LOAD threshold for apps that have a real window
+class (Electron, Chrome PWA). Syntax: `class = floor=0a, max=0e, busy-up=50`
+(each key optional):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `floor` | `-` (off) | Resting pstate — IDLE never goes below this ladder state. |
+| `max` | profile ceiling | Own ceiling (ladder state), overrides the profile cap. |
+| `busy-up` | `0` (global 80) | Own UP-LOAD threshold (%). `0` = the global `busy-up`. |
+
+A class with a `[caps]` entry behaves like `[preferred]` **while focused**, but
+is **not** matched by `[preferred-titles]` — no force-`0e` on title match. Use
+it for Desktop Discord — both possible classes (Electron `discord`, PWA
+`chrome-discord.com__channels_@me-Default`) get the same policy: base `0a`,
+busy > 50 % → `0e`, idle → back `0a`. TERMAL stays top priority (may go below
+`floor`). A Discord **tab** in a browser has no `[caps]` entry and keeps the
+force-`0e` title path unchanged.
+
+```ini
+[caps]
+discord = floor=0a, max=0e, busy-up=50
+chrome-discord.com__channels_@me-Default = floor=0a, max=0e, busy-up=50
+```
 
 ### `[low-power]` section
 
