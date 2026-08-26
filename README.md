@@ -154,6 +154,15 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   cycle and, when the config is lost, re-initializes the counters and resets
   the busy window (logged to the journal). Complements the `system-sleep`
   hook (daemon restart on post-resume) as a safety net. No config change.
+- 🌬 **Compiler → fans 100% (v4.6)**: a running compiler or build tool
+  (`clang*`, `gcc*`, `g++*`, `cc`, `c++`, `cc1`, `cc1plus`, `make`, `cmake`,
+  `ninja`, `cargo`, `rustc`, `meson`, `go`, `javac`, `ld`, `as`, `sccache`,
+  `ccache`, ...) drives the fans to max RPM — no thermal throttling mid-build.
+  Detection scans `/proc/*/comm` (cmdline fallback) every poll cycle and also
+  matches version prefixes (`gcc-14`, `clang-18`, ...). Boost applies only in
+  auto-mode — a manual fan override keeps priority. When the build ends, fans
+  return to the temperature curve. Config: `[compiler]` (`enable` / `fan-max`
+  / `names`).
 - 🌡 **Per-profile thermal guard**: thermal downclock is **per-profile**, not
   global. `default` throttles at 65°C / recovers below 58°C; `preferred`
   throttles at 82°C / recovers below 75°C. Thermal down is prioritized over
@@ -241,8 +250,10 @@ reclocked/
 │   ├── 0002-mesa-nvc0-sched-data.patch   Mesa nvc0 scheduler latency data
 │   ├── 0003-reclockd-caps-ceiling.patch  reclockd v4.4 per-class [caps] policy
 │   ├── 0004-reclockd-s3-selfheal.patch   reclockd v4.5 self-healing busy counters after S3
+│   ├── 0005-reclockd-compiler-fan.patch  reclockd v4.6 compiler detected → fans 100%
 │   ├── 81-nouveau-kepler.rules           udev rule: force-load nouveau (bypass nvidia-utils blacklist)
-│   └── reclockd.conf-caps.diff           reclockd.conf diff — [caps] Discord 0a/0e busy-gated
+│   ├── reclockd.conf-caps.diff           reclockd.conf diff — [caps] Discord 0a/0e busy-gated
+│   └── reclockd.conf-compiler.diff       reclockd.conf diff — [compiler] fan boost
 ├── install-udev-rule.sh            installs the udev rule above
 ├── pstate.sh                       inspect/force pstate via debugfs (+ override)
 ├── build-mesa.sh                   build patched Mesa (nouveau-only)
@@ -374,6 +385,36 @@ they prevent the `0e` lockup after sleep. No config change needed.
 **Verify after `systemctl suspend`:** `reclockctl status` should settle back
 to `07` (not stick at `0e`), the daemon MainPID should be new (hook
 restart), and `journalctl -u reclockd -n 50` may show the reinit log.
+
+### 🌬 Compiler → fans 100% (v4.6)
+
+Builds are bursty: a big compile can peg the CPU while the GPU idles, so the
+GPU-temp-driven curve never raises the fans — and the CPU thermal-throttles
+mid-build. v4.6 scans `/proc/*/comm` every poll cycle; when a compiler or
+build tool is running, `Fan::set_boost()` drives both fans to their max RPM
+(or `fan-max` %) and holds them until the build ends, then falls back to the
+temperature curve.
+
+Detected by default: `clang*`, `gcc*`, `g++*` (any version suffix), `cc`,
+`c++`, `cc1`, `cc1plus`, `make`, `cmake`, `ninja`, `cargo`, `rustc`, `meson`,
+`go`, `javac`, `ld`, `as`, `sccache`, `ccache`. Process name comes from
+`/proc/*/comm`; when `comm` is not a real name (kernel threads `[xyz]`), it
+falls back to the `cmdline` basename.
+
+`[compiler]` section (all optional):
+
+| key       | default | meaning                                              |
+|-----------|---------|------------------------------------------------------|
+| `enable`  | `true`  | 1/0 — turn the whole feature off                     |
+| `fan-max` | `100`   | % of max fan RPM to apply (50 = half range)          |
+| `names`   | —       | extra process names, comma-separated (e.g. `mycc`)   |
+
+Boost only applies in **auto-mode** — a manual override (`reclockctl fan-off`,
+`/run/reclockd/fan-override`) keeps priority and is never overwritten.
+**Verify:** start a `make -j` or `g++` build — fans jump to max within ~1 s
+(`journalctl -u reclockd` logs
+`fan: KOMPILATOR wykryty (cc1) -> fan1=... fan2=... (boost 100%)`); when the
+build finishes, fans return to the curve.
 
 ### `[low-power]` section
 

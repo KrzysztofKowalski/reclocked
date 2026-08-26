@@ -163,6 +163,15 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
   konfiguracja ginie, ponownie inicjuje liczniki i resetuje okno busy (log do
   journala). Uzupełnia hook `system-sleep` (restart daemona po resume) jako
   siatka bezpieczeństwa. Bez zmian w konfiguracji.
+- 🌬 **Kompilator → wiatraki 100% (v4.6)**: gdy działa kompilator lub tool
+  budowania (`clang*`, `gcc*`, `g++*`, `cc`, `c++`, `cc1`, `cc1plus`, `make`,
+  `cmake`, `ninja`, `cargo`, `rustc`, `meson`, `go`, `javac`, `ld`, `as`,
+  `sccache`, `ccache`, ...), wentylatory lecą na max RPM — build nie
+  throttle'uje termicznie. Detekcja skanuje `/proc/*/comm` (fallback cmdline)
+  co cykl polla i łapie też prefiksy wersji (`gcc-14`, `clang-18`, ...). Boost
+  działa TYLKO w auto-mode — ręczny override (reclockctl fan-off) ma
+  priorytet. Gdy build się skończy, wiatraki wracają do krzywej temp. Konfig:
+  sekcja `[compiler]` (`enable` / `fan-max` / `names`).
 - 🌡 **Per-profil zabezpieczenie termiczne**: downclock termiczny jest
   **per-profil**, a nie globalny. `default` obniża taktowanie przy 65°C /
   odzyskuje poniżej 58°C; `preferred` obniża przy 82°C / odzyskuje poniżej
@@ -258,8 +267,10 @@ reclocked/
 │   ├── 0002-mesa-nvc0-sched-data.patch   dane latencji schedulera Mesa nvc0
 │   ├── 0003-reclockd-caps-ceiling.patch  reclockd v4.4 polityka per-klasowa [caps]
 │   ├── 0004-reclockd-s3-selfheal.patch   reclockd v4.5 samouzdrawianie liczników busy po S3
+│   ├── 0005-reclockd-compiler-fan.patch  reclockd v4.6 wykryty kompilator → wiatraki 100%
 │   ├── 81-nouveau-kepler.rules           reguła udev: wymuś nouveau (omija blacklist nvidia-utils)
-│   └── reclockd.conf-caps.diff           diff reclockd.conf — [caps] Discord 0a/0e busy-gated
+│   ├── reclockd.conf-caps.diff           diff reclockd.conf — [caps] Discord 0a/0e busy-gated
+│   └── reclockd.conf-compiler.diff       diff reclockd.conf — [compiler] boost wiatraków
 ├── install-udev-rule.sh            instaluje powyższą regułę udev
 ├── pstate.sh                       inspekcja/wymuszanie pstate przez debugfs (+ override)
 ├── build-mesa.sh                   budowanie patchowanego Mesa (tylko nouveau)
@@ -391,6 +402,36 @@ w `0e` po sleepie. Bez zmian w konfiguracji.
 **Weryfikacja po `systemctl suspend`:** `reclockctl status` powinien wrócić
 do `07` (nie utknąć na `0e`), MainPID daemona powinien być nowy (restart
 z hooka), a `journalctl -u reclockd -n 50` może pokazać log reinitu.
+
+### 🌬 Kompilator → wiatraki 100% (v4.6)
+
+Budowanie jest impulsowe: duża kompilacja potrafi zapchać CPU, podczas gdy GPU
+bezczynnieje, więc krzywa temp (sterowana temp. GPU) nigdy nie podnosi
+wiatraków — a CPU throttle'uje termicznie w trakcie buildu. v4.6 skanuje
+`/proc/*/comm` co cykl polla; gdy działa kompilator lub tool budowania,
+`Fan::set_boost()` ustawia oba wiatraki na max RPM (lub `fan-max` %) i trzyma
+je do końca buildu, po czym wraca do krzywej temperaturowej.
+
+Wykrywane domyślnie: `clang*`, `gcc*`, `g++*` (dowolny sufiks wersji), `cc`,
+`c++`, `cc1`, `cc1plus`, `make`, `cmake`, `ninja`, `cargo`, `rustc`, `meson`,
+`go`, `javac`, `ld`, `as`, `sccache`, `ccache`. Nazwa procesu z `/proc/*/comm`;
+gdy `comm` nie jest prawdziwą nazwą (wątki jądra `[xyz]`), fallback do
+basenamu `cmdline`.
+
+Sekcja `[compiler]` (wszystko opcjonalne):
+
+| key       | default | znaczenie                                          |
+|-----------|---------|----------------------------------------------------|
+| `enable`  | `true`  | 1/0 — wyłącza całą funkcję                         |
+| `fan-max` | `100`   | % maksymalnych RPM wiatraków (50 = pół zakresu)     |
+| `names`   | —       | dodatkowe nazwy procesów, przecinkami (np. `mycc`) |
+
+Boost działa TYLKO w **auto-mode** — ręczny override (`reclockctl fan-off`,
+`/run/reclockd/fan-override`) ma priorytet i nigdy nie jest nadpisywany.
+**Weryfikacja:** odpal `make -j` lub `g++` — wiatraki skaczą na max w ~1 s
+(`journalctl -u reclockd` zaloguje
+`fan: KOMPILATOR wykryty (cc1) -> fan1=... fan2=... (boost 100%)`); po
+skończonym buildzie wiatraki wracają do krzywej.
 
 ### Sekcja `[low-power]`
 
