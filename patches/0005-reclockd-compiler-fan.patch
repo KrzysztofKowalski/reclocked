@@ -1,0 +1,254 @@
+diff --git a/reclockd/reclockd.cpp b/reclockd/reclockd.cpp
+index 05b741d..2e6cb2d 100644
+--- a/reclockd/reclockd.cpp
++++ b/reclockd/reclockd.cpp
+@@ -115,6 +115,19 @@
+ //      Readback jest tani (mmap, co interval_ms) i bez fałszywych alarmów
+ //      (nie zależy od busy/temp). Współpracuje z hookiem system-sleep
+ //      (restart na post resume) jako siatka bezpieczeństwa.
++//
++// v4.6 (2026-08-26):
++//   L. KOMPILATOR→FAN 100%: gdy wykryty uruchomiony kompilator
++//      (clang/gcc/g++/cc/c++/cc1/cc1plus/make/cmake/ninja/cargo/rustc/... —
++//      skan /proc/*/comm z fallbackiem na cmdline), wentylatory na fan-max%
++//      (default 100 = pełne wiatraki). Sekcja [compiler]: enable/fan-max/names
++//      (names = dodatkowe nazwy przecinkami). Fan.set_boost(pct) pisze
++//      manual=1 + output dla obu wentylatorów (liniowa interpolacja między
++//      fanN_min a fanN_max). Boost działa TYLKO w auto-mode — fan-override
++//      flag-file (/run/reclockd/fan-override) ma priorytet (nie nadpisuje
++//      ręcznego sterowania). Gdy kompilator zniknie → powrót do krzywej temp
++//      (normalna ścieżka). Detekcja co poll_cycles (1 s), próg — zatrzymaj
++//      scan gdy znaleziono.
+ 
+ #include <algorithm>
+ #include <cctype>
+@@ -267,6 +280,12 @@ struct Config {
+     bool fan_enable     = true;
+     int  fan_temp_min   = 40;     // °C → min RPM (najcicho)
+     int  fan_temp_max   = 67;     // °C → max RPM (najgłośniej)
++    // v4.6: sekcja [compiler] — boost wentylatorów gdy wykryty kompilator
++    // (skan /proc/*/comm z fallbackiem na cmdline). fan_max = % maksymalnych
++    // RPM (100 = pełne wiatraki). names = dodatkowe nazwy do wykrycia (przecinkami).
++    bool compiler_enable   = true;
++    int  compiler_fan_max  = 100;
++    std::set<std::string> compiler_names;
+     bool vblank_sync    = true;
+     bool probe = false;
+     bool dry   = false;
+@@ -458,6 +477,30 @@ static bool load_config(const std::string& path, Config& cfg)
+             else if (keyf == "temp-max") cfg.fan_temp_max = parse_int(valf);
+             continue;
+         }
++        // v4.6: sekcja [compiler] — boost wentylatorów gdy wykryty kompilator.
++        // Klucze: enable (1/0), fan-max (% maksymalnych RPM), names (przecinkami).
++        if (section == "compiler") {
++            size_t eqg = t.find('=');
++            if (eqg == std::string::npos) continue;
++            std::string keyg = trim(t.substr(0, eqg));
++            std::string valg = trim(t.substr(eqg + 1));
++            if      (keyg == "enable")  cfg.compiler_enable  = (valg == "1" || valg == "true" || valg == "yes");
++            else if (keyg == "fan-max") cfg.compiler_fan_max = parse_int(valg);
++            else if (keyg == "names") {
++                // Lista nazw przecinkami: "ccache, sccache, ..." (opcjonalne).
++                cfg.compiler_names.clear();
++                size_t p0 = 0;
++                while (p0 <= valg.size()) {
++                    size_t csep = valg.find(',', p0);
++                    std::string tok = trim(valg.substr(p0, csep == std::string::npos
++                        ? std::string::npos : csep - p0));
++                    if (!tok.empty()) cfg.compiler_names.insert(tok);
++                    if (csep == std::string::npos) break;
++                    p0 = csep + 1;
++                }
++            }
++            continue;
++        }
+         // Sekcje [profile default] / [profile preferred] oraz ew. [global].
+         size_t eq = t.find('=');
+         std::string key, val;
+@@ -504,6 +547,9 @@ static bool load_config(const std::string& path, Config& cfg)
+              cfg.fan_temp_max, cfg.fan_temp_min);
+         cfg.fan_temp_min = 40; cfg.fan_temp_max = 67;
+     }
++    // v4.6: sanity compiler — fan-max clamp do [0,100] (100 = pełne wiatraki).
++    if (cfg.compiler_fan_max < 0) cfg.compiler_fan_max = 0;
++    if (cfg.compiler_fan_max > 100) cfg.compiler_fan_max = 100;
+     return true;
+ }
+ 
+@@ -683,6 +729,25 @@ public:
+         last_temp_ = temp; last_rpm1_ = rpm1; last_rpm2_ = rpm2;
+     }
+ 
++    // v4.6: BOOST — wymuś pct% maksymalnych RPM (100 = pełne wiatraki). Zamiast
++    // krzywej temp→RPM, stały procent zakresu: rpm = fanN_min + pct/100*(fanN_max
++    // - fanN_min). Manual=1 + zapis output dla obu wentylatorów (jak set()).
++    // pct clamp do [0,100]. Używane gdy wykryty kompilator (sekcja [compiler]).
++    void set_boost(int pct)
++    {
++        if (!ok_) return;
++        if (pct < 0) pct = 0;
++        if (pct > 100) pct = 100;
++        double x = pct / 100.0;
++        int rpm1 = fan1_min_ + (int)(x * (fan1_max_ - fan1_min_) + 0.5);
++        int rpm2 = fan2_min_ + (int)(x * (fan2_max_ - fan2_min_) + 0.5);
++        write_file((std::string(FAN_BASE) + "/fan1_manual").c_str(), "1");
++        write_file((std::string(FAN_BASE) + "/fan2_manual").c_str(), "1");
++        write_file((std::string(FAN_BASE) + "/fan1_output").c_str(), std::to_string(rpm1));
++        write_file((std::string(FAN_BASE) + "/fan2_output").c_str(), std::to_string(rpm2));
++        last_temp_ = -1; last_rpm1_ = rpm1; last_rpm2_ = rpm2;
++    }
++
+     // Fail-safe: zwróć kontrolę do SMC. Wołane przy wyjściu demona (restore).
+     void restore_auto()
+     {
+@@ -714,6 +779,73 @@ static bool fan_override_active()
+     return stat(FAN_OVERRIDE_FILE, &st) == 0;
+ }
+ 
++// ----------------------------------------------------------- kompilatory (/proc)
++// v4.6: detekcja uruchomionych kompilatorów. Skan /proc/<pid>/comm (basename
++// procesu) z fallbackiem na cmdline (argv[0] basename) — łapie np. procesy,
++// których comm nie jest oczywisty. Dopasowanie case-sensitive; oprócz listy
++// bazowej też prefiksy wersji (gcc-*, g++-*, clang-*) i rozszerzenie z configu
++// ([compiler] names). Scan co poll_cycles (1 s), zatrzymaj gdy znaleziono.
++
++static const std::set<std::string>& default_compiler_names()
++{
++    static const std::set<std::string> names = {
++        "clang", "clang++", "clang-14", "clang-15", "clang-16", "clang-17", "clang-18",
++        "gcc", "g++", "cc", "c++", "cc1", "cc1plus", "cc1obj", "cc1objplus",
++        "make", "cmake", "ninja", "ninja-build", "cargo", "rustc", "meson",
++        "go", "javac", "ld", "ld.lld", "lld", "as", "sccache", "ccache",
++    };
++    return names;
++}
++
++// Zwraca nazwę jeśli pasuje do listy kompilatorów, inaczej "".
++static std::string compiler_match(const std::string& name)
++{
++    if (name.empty()) return "";
++    const std::set<std::string>& base = default_compiler_names();
++    if (base.count(name)) return name;
++    if (g_cfg.compiler_names.count(name)) return name;
++    // Wersjonowane binaria: gcc-12, g++-12, clang-19, ... (prefix, case-sensitive).
++    if (name.rfind("gcc-", 0) == 0 || name.rfind("g++-", 0) == 0 ||
++        name.rfind("clang-", 0) == 0) return name;
++    return "";
++}
++
++// Skanuje /proc i zwraca nazwę wykrytego kompilatora lub "" gdy brak.
++// Wywoływana tylko w bloku wentylatorów (co poll_cycles = 1 s).
++static std::string compiler_running()
++{
++    DIR* d = opendir("/proc");
++    if (!d) return "";
++    struct dirent* e;
++    std::string found;
++    while ((e = readdir(d))) {
++        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue; // tylko PIDs
++        std::string bp = std::string("/proc/") + e->d_name;
++        std::string comm;
++        if (read_file((bp + "/comm").c_str(), comm) == 0) {
++            comm = trim(comm);
++            found = compiler_match(comm);
++            if (!found.empty()) break;
++        }
++        // Fallback: cmdline (argv[0] basename). Pomiń wątki jądra (comm "[...]" —
++        // cmdline i tak puste), oszczędza otwieranie plików dla ~100 wątków.
++        if (comm.empty() || comm[0] != '[') {
++            std::string cmdline;
++            if (read_file((bp + "/cmdline").c_str(), cmdline) == 0 && !cmdline.empty()) {
++                size_t nul = cmdline.find('\0');
++                std::string a0 = cmdline.substr(0, nul == std::string::npos
++                    ? cmdline.size() : nul);
++                size_t slash = a0.rfind('/');
++                std::string base = slash == std::string::npos ? a0 : a0.substr(slash + 1);
++                found = compiler_match(base);
++                if (!found.empty()) break;
++            }
++        }
++    }
++    closedir(d);
++    return found;
++}
++
+ static int set_pstate(uint32_t st)
+ {
+     char buf[8];
+@@ -962,7 +1094,7 @@ static std::string override_content()
+ static void usage(const char* argv0)
+ {
+     std::printf(
+-        "reclockd v4.5 — polityka profilowa (app-aware) + wentylatory + override + reload\n"
++        "reclockd v4.6 — polityka profilowa (app-aware) + wentylatory + override + reload\n"
+         "Użycie: %s [opcje]\n"
+         "  Profile: default (cap 07) ↔ preferred (cap 0e).\n"
+         "  Bezpieczna drabinka AUTO: 07 ↔ 0a ↔ 0e. 0f = BOOST TIER nad drabinką\n"
+@@ -1163,6 +1295,13 @@ int main(int argc, char** argv)
+         logf(1, "fan: wyłączony w configu (enable=false)");
+     }
+ 
++    // v4.6: detekcja kompilatorów (boost wentylatorów). Status przy starcie.
++    if (g_cfg.compiler_enable)
++        logf(1, "compiler: detekcja /proc AKTYWNA (boost fan-max=%d%%)",
++             g_cfg.compiler_fan_max);
++    else
++        logf(1, "compiler: wyłączony w configu (enable=false)");
++
+     std::string old_pm;
+     bool pm_saved = read_file(POWER_CTRL, old_pm) == 0;
+     if (pm_saved) write_file(POWER_CTRL, "on");
+@@ -1237,7 +1376,7 @@ int main(int argc, char** argv)
+     int prev_fan_rpm1 = -1, prev_fan_rpm2 = -1;
+     bool prev_fan_override = false;
+ 
+-    logf(1, "start v4.5: interval=%dms poll=%dms, "
++    logf(1, "start v4.6: interval=%dms poll=%dms, "
+             "default[cap=%s temp-up=%d temp-down=%d], "
+             "preferred[cap=%s boost=%s busy-boost=%d%% boost-dwell=%dms "
+             "temp-up=%d temp-down=%d], "
+@@ -1335,15 +1474,38 @@ int main(int argc, char** argv)
+                 logf(1, "fan-override ZDJĘTY — wznawiam auto wentylatorów");
+             prev_fan_override = fov;
+             if (!fov) {
+-                fan.set(temp, g_cfg.fan_temp_min, g_cfg.fan_temp_max);
++                // v4.6: kompilator → boost. Gdy wykryty uruchomiony kompilator
++                // (clang/gcc/make/cmake/... — skan /proc, compiler_running()),
++                // wentylatory na fan-max% (default 100 = pełne wiatraki). Boost
++                // TYLKO w auto-mode — fan-override flag ma priorytet (nie
++                // nadpisuj ręcznego sterowania). Gdy kompilator zniknie →
++                // normalna ścieżka: krzywa temp poniżej.
++                bool boost_on = false;
++                std::string cname;
++                if (g_cfg.compiler_enable) {
++                    cname = compiler_running();
++                    boost_on = !cname.empty();
++                }
++                if (boost_on)
++                    fan.set_boost(g_cfg.compiler_fan_max);
++                else
++                    fan.set(temp, g_cfg.fan_temp_min, g_cfg.fan_temp_max);
+                 int r1 = fan.last_rpm1(), r2 = fan.last_rpm2();
+                 if (r1 != prev_fan_rpm1 || r2 != prev_fan_rpm2) {
+-                    logf(1, "fan: temp=%d°C -> fan1=%d fan2=%d RPM (krzywa %d-%d°C)",
+-                         temp, r1, r2, g_cfg.fan_temp_min, g_cfg.fan_temp_max);
++                    if (boost_on)
++                        logf(1, "fan: KOMPILATOR wykryty (%s) -> fan1=%d fan2=%d RPM (boost %d%%)",
++                             cname.c_str(), r1, r2, g_cfg.compiler_fan_max);
++                    else
++                        logf(1, "fan: temp=%d°C -> fan1=%d fan2=%d RPM (krzywa %d-%d°C)",
++                             temp, r1, r2, g_cfg.fan_temp_min, g_cfg.fan_temp_max);
+                     prev_fan_rpm1 = r1; prev_fan_rpm2 = r2;
+                 } else if (g_cfg.verbosity >= 2) {
+-                    logf(2, "fan: temp=%d°C fan1=%d fan2=%d RPM (bez zmian)",
+-                         temp, r1, r2);
++                    if (boost_on)
++                        logf(2, "fan: KOMPILATOR wykryty (%s) fan1=%d fan2=%d RPM (bez zmian, boost %d%%)",
++                             cname.c_str(), r1, r2, g_cfg.compiler_fan_max);
++                    else
++                        logf(2, "fan: temp=%d°C fan1=%d fan2=%d RPM (bez zmian)",
++                             temp, r1, r2);
+                 }
+             }
+         }

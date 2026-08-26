@@ -1,0 +1,27 @@
+diff --git a/reclockd/reclockd.conf b/reclockd/reclockd.conf
+index 0c7d246..f7190cf 100644
+--- a/reclockd/reclockd.conf
++++ b/reclockd/reclockd.conf
+@@ -99,4 +99,19 @@ gr-idle-promille = 300
+ [fan]
+ enable = true
+ temp-min = 40
+-temp-max = 67
+\ No newline at end of file
++temp-max = 67
++
++# v4.6: boost wentylatorów gdy wykryty uruchomiony kompilator. Skan /proc/*/comm
++# (fallback cmdline) co poll-ms (1 s) za: clang, clang++, gcc, g++, cc, c++,
++# cc1, cc1plus, make, cmake, ninja, cargo, rustc, meson, go, javac, ld, as,
++# sccache, ccache + prefiksy wersji (gcc-*, g++-*, clang-*).
++#   enable   — 1/0 (default 1): włącza całość
++#   fan-max  — % maksymalnych RPM (default 100 = pełne wiatraki; 50 = pół zakresu)
++#   names    — dodatkowe nazwy procesów do wykrycia (przecinkami; opcjonalne)
++# Boost działa TYLKO w auto-mode — fan-override (/run/reclockd/fan-override,
++# reclockctl fan-off) ma priorytet (ręczne sterowanie nie jest nadpisywane).
++# Gdy kompilator zniknie → powrót do krzywej temp (normalna ścieżka).
++[compiler]
++enable = true
++fan-max = 100
++# names = mycc, mybuild
+\ No newline at end of file
