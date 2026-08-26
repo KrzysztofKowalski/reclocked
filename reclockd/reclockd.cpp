@@ -103,6 +103,18 @@
 //      baza 0a, busy>50% → 0e, idle → 0a. TERMAL nadal nadrzędny (zejście
 //      nawet poniżej floor). Karta Discord w przeglądarce (chromium/firefox)
 //      nie jest w [caps] → title-priority force-0e bez zmian.
+//
+// v4.5 (2026-08-26):
+//   K. SAMOUZDRAWIANIE po S3: po suspend/resume (deep) GPU traci zasilanie i
+//      konfigurację liczników busy PMU w BAR0 (R_IDLE_CTRL/R_IDLE_MASK) —
+//      liczniki nie zliczają, sample() zwraca stale 1000‰, IDLE downshift i
+//      GR-idle gate są zablokowane, daemon zostaje w 0e (raport 63). W pętli
+//      głównej readback R_IDLE_CTRL co cykl; gdy (ctrl & CTRL_VALUE_MASK) !=
+//      CTRL_VALUE_ALWAYS (konfiguracja stracona — typowo po resume), robi
+//      gpu.init_counters() + reset_after_transition() i loguje do journala.
+//      Readback jest tani (mmap, co interval_ms) i bez fałszywych alarmów
+//      (nie zależy od busy/temp). Współpracuje z hookiem system-sleep
+//      (restart na post resume) jako siatka bezpieczeństwa.
 
 #include <algorithm>
 #include <cctype>
@@ -950,7 +962,7 @@ static std::string override_content()
 static void usage(const char* argv0)
 {
     std::printf(
-        "reclockd v4.3 — polityka profilowa (app-aware) + wentylatory + override + reload\n"
+        "reclockd v4.5 — polityka profilowa (app-aware) + wentylatory + override + reload\n"
         "Użycie: %s [opcje]\n"
         "  Profile: default (cap 07) ↔ preferred (cap 0e).\n"
         "  Bezpieczna drabinka AUTO: 07 ↔ 0a ↔ 0e. 0f = BOOST TIER nad drabinką\n"
@@ -1225,7 +1237,7 @@ int main(int argc, char** argv)
     int prev_fan_rpm1 = -1, prev_fan_rpm2 = -1;
     bool prev_fan_override = false;
 
-    logf(1, "start v4.3: interval=%dms poll=%dms, "
+    logf(1, "start v4.5: interval=%dms poll=%dms, "
             "default[cap=%s temp-up=%d temp-down=%d], "
             "preferred[cap=%s boost=%s busy-boost=%d%% boost-dwell=%dms "
             "temp-up=%d temp-down=%d], "
@@ -1285,6 +1297,22 @@ int main(int argc, char** argv)
         }
 
         uint32_t b = gpu.sample();
+
+        // v4.5: samouzdrawianie po S3. Po suspend/resume (deep) GPU traci
+        // konfigurację liczników busy PMU w BAR0 — total nie zlicza, sample()
+        // zwraca stale 1000‰, co blokuje IDLE downshift i wiecznie odracza DOWN
+        // przez GR-idle gate (daemon zostaje w 0e; raport 63). Readback
+        // R_IDLE_CTRL jest tani (mmap, co interval_ms) i bez fałszywych alarmów:
+        // CTRL_VALUE_ALWAYS to stan normalny, każda inna wartość = konfiguracja
+        // stracona (typowy stan po resume). Po re-init liczniki zliczają ponownie
+        // i daemon sam schodzi do poprawnego idle.
+        uint32_t ctrl_v = gpu.rd(R_IDLE_CTRL + C_TOTAL * 16);
+        if ((ctrl_v & CTRL_VALUE_MASK) != CTRL_VALUE_ALWAYS) {
+            logf(0, "PMU busy counters config lost (post-resume?) — reinitializing (ctrl=%08x)", ctrl_v);
+            gpu.init_counters();
+            reset_after_transition();   // ring.clear() + dwell=0 — świeże okno busy
+        }
+
         ring.push(b);
         uint32_t busy_avg = ring.avg(); // ‰
         int temp = hw.read_temp();

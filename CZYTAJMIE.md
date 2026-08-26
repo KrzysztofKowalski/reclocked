@@ -156,6 +156,13 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
   force-`0e` po tytule. Przykład: desktop Discord — baza `0a`, busy > 50 % →
   `0e`, idle → z powrotem `0a`. TERMAL pozostaje nadrzędny (może zejść poniżej
   `floor`).
+- 🛡 **Samouzdrawianie po suspend/resume (v4.5)**: głęboki sleep (S3) odcina
+  zasilanie GPU i gubi konfigurację liczników busy PMU w BAR0 — próbkowanie
+  busy zwraca wtedy stale 1000‰, co blokuje zejście IDLE i GR-idle gate,
+  zostawiając daemon w `0e`. v4.5 odczytuje `R_IDLE_CTRL` co cykl i, gdy
+  konfiguracja ginie, ponownie inicjuje liczniki i resetuje okno busy (log do
+  journala). Uzupełnia hook `system-sleep` (restart daemona po resume) jako
+  siatka bezpieczeństwa. Bez zmian w konfiguracji.
 - 🌡 **Per-profil zabezpieczenie termiczne**: downclock termiczny jest
   **per-profil**, a nie globalny. `default` obniża taktowanie przy 65°C /
   odzyskuje poniżej 58°C; `preferred` obniża przy 82°C / odzyskuje poniżej
@@ -250,6 +257,7 @@ reclocked/
 │   ├── 0001-nouveau-auto-reclock.patch   polityka auto-reclocku w jądrze nouveau
 │   ├── 0002-mesa-nvc0-sched-data.patch   dane latencji schedulera Mesa nvc0
 │   ├── 0003-reclockd-caps-ceiling.patch  reclockd v4.4 polityka per-klasowa [caps]
+│   ├── 0004-reclockd-s3-selfheal.patch   reclockd v4.5 samouzdrawianie liczników busy po S3
 │   ├── 81-nouveau-kepler.rules           reguła udev: wymuś nouveau (omija blacklist nvidia-utils)
 │   └── reclockd.conf-caps.diff           diff reclockd.conf — [caps] Discord 0a/0e busy-gated
 ├── install-udev-rule.sh            instaluje powyższą regułę udev

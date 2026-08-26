@@ -147,6 +147,13 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   force-`0e` title path. Example — Desktop Discord: base `0a`, busy > 50 % →
   `0e`, idle → back to `0a`. TERMAL remains top priority (may drop below
   `floor`).
+- 🛡 **Self-healing after suspend/resume (v4.5)**: deep sleep (S3) cuts the
+  GPU power and drops the PMU busy-counter config in BAR0 — busy sampling then
+  returns a constant 1000‰, which blocks the IDLE downshift and the GR-idle
+  gate, leaving the daemon stuck at `0e`. v4.5 readbacks `R_IDLE_CTRL` every
+  cycle and, when the config is lost, re-initializes the counters and resets
+  the busy window (logged to the journal). Complements the `system-sleep`
+  hook (daemon restart on post-resume) as a safety net. No config change.
 - 🌡 **Per-profile thermal guard**: thermal downclock is **per-profile**, not
   global. `default` throttles at 65°C / recovers below 58°C; `preferred`
   throttles at 82°C / recovers below 75°C. Thermal down is prioritized over
@@ -233,6 +240,7 @@ reclocked/
 │   ├── 0001-nouveau-auto-reclock.patch   nouveau kernel auto-reclock policy
 │   ├── 0002-mesa-nvc0-sched-data.patch   Mesa nvc0 scheduler latency data
 │   ├── 0003-reclockd-caps-ceiling.patch  reclockd v4.4 per-class [caps] policy
+│   ├── 0004-reclockd-s3-selfheal.patch   reclockd v4.5 self-healing busy counters after S3
 │   ├── 81-nouveau-kepler.rules           udev rule: force-load nouveau (bypass nvidia-utils blacklist)
 │   └── reclockd.conf-caps.diff           reclockd.conf diff — [caps] Discord 0a/0e busy-gated
 ├── install-udev-rule.sh            installs the udev rule above
