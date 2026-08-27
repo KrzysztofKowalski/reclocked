@@ -193,6 +193,12 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
   krzywa igd, ON → standardowa 40/67 °C. `pstate.sh status` ma dodatkową
   sekcję `=== wentylatory ===` — aktywna krzywa + zakres + obroty z
   `/run/reclockd/status` (fallback do sysfs applesmc, gdy daemon nie działa).
+- 🔀 **Przeglądarki wymuszają dGPU (v5.2)**: klasy przeglądarek (`chromium`,
+  `firefox`, `google-chrome`, `brave`) dodane do `[dgpu-hard]` — focus
+  przeglądarki promuje dGPU (power-on) z profilem `[preferred]` (pstate
+  `0a/0e`); przejście focusu na terminal demote'uje z powrotem
+  (`[igpu]`/`[low-power]`). Tylko konfiguracja — daemon widzi zmianę na żywo
+  przez `reclockctl reload` (SIGHUP), bez rebuildu.
 - 🌡 **Per-profil zabezpieczenie termiczne**: downclock termiczny jest
   **per-profil**, a nie globalny. `default` obniża taktowanie przy 65°C /
   odzyskuje poniżej 58°C; `preferred` obniża przy 82°C / odzyskuje poniżej
@@ -498,7 +504,9 @@ Sekcja `[switch]`:
 Co promuje / demote'uje:
 
 - `[dgpu-hard]` — klasy okien wymuszające dGPU (twarda promocja, bez busy
-  gate): `game`, `blender`, `steam`.
+  gate): `game`, `blender`, `steam`, `chromium`, `firefox`,
+  `google-chrome`, `brave` (v5.2: przeglądarki — focus → dGPU ON + pstate
+  `0a/0e` z profilu `[preferred]`; demote po przejściu focusu na terminal).
 - `[dgpu-soft]` — klasy z miękką promocją busy-gated (na start puste).
 - `[igpu]` — klasy zawsze na iGPU (democja): `foot`, `kitty`, `alacritty`.
 - `[dgpu-procs]` — nazwy procesów (skan `/proc/*/comm`) wymagające dGPU:

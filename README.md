@@ -184,6 +184,12 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   curve, ON → the standard 40/67 °C. `pstate.sh status` now also prints an
   `=== wentylatory ===` section — the active curve + range + RPMs from
   `/run/reclockd/status` (applesmc sysfs fallback when the daemon is down).
+- 🔀 **Browsers force the dGPU on (v5.2)**: browser classes (`chromium`,
+  `firefox`, `google-chrome`, `brave`) were added to `[dgpu-hard]` — browser
+  focus promotes the dGPU (power-on) with the `[preferred]` profile (pstate
+  `0a/0e`); focus moving to a terminal demotes back (`[igpu]`/`[low-power]`).
+  Config-only — the daemon picks it up live via `reclockctl reload` (SIGHUP),
+  no rebuild.
 - 🌡 **Per-profile thermal guard**: thermal downclock is **per-profile**, not
   global. `default` throttles at 65°C / recovers below 58°C; `preferred`
   throttles at 82°C / recovers below 75°C. Thermal down is prioritized over
@@ -481,7 +487,9 @@ is out of scope for the gmux.
 What promotes / demotes:
 
 - `[dgpu-hard]` — window classes that force the dGPU on (hard promotion, no
-  busy gate): `game`, `blender`, `steam`.
+  busy gate): `game`, `blender`, `steam`, `chromium`, `firefox`,
+  `google-chrome`, `brave` (v5.2: browsers — focus → dGPU ON + pstate `0a/0e`
+  from `[preferred]`; demote when focus moves to a terminal).
 - `[dgpu-soft]` — classes with busy-gated soft promotion (empty by default).
 - `[igpu]` — classes always kept on the iGPU (demotion): `foot`, `kitty`,
   `alacritty`.
