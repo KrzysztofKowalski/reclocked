@@ -1,0 +1,60 @@
+From 0009-nouveau-pcie-link-retrain Mon Sep 17 00:00:00 2001
+From: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+Date: Tue, 26 Aug 2026 00:00:00 +0200
+Subject: [PATCH 0009/0010] nouveau: retrain PCIe link to max after resume
+
+After a hard power-cycle of the GT 750M (apple-gmux cutting the core /
+VRAM / PCIe rails on the MacBookPro11,3) the PCIe link frequently comes
+back at the lowest common speed (2.5GT/s) instead of the negotiated
+5GT/s, silently regressing the dGPU to gen1 (raport 22 section B.4, raport 48
+section 3).  nvkm_pcie_init() already raises the cap/lnkctl registers to the
+maximum via the chip's ->pcie.init() (gk104_pcie_init), but nothing ever
+triggers a link retrain: nvkm_pcie_set_link() is only called when an
+explicit speed was requested (pci->pcie.speed != -1), which is not the
+case for a plain runtime resume.
+
+Extend nvkm_pcie_init(): when no explicit speed is pending, read the
+current negotiated speed and, if it is below the card maximum, retrain to
+the maximum through the existing nvkm_pcie_set_link() path (same HW
+sequence the pstate code uses).  The retrain is a no-op whenever the link
+is already at the maximum speed, so boot paths and already-fast links are
+unaffected.
+
+Signed-off-by: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+---
+ drivers/gpu/drm/nouveau/nvkm/subdev/pci/pcie.c | 21 +++++++++++++++++++++
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/pci/pcie.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/pci/pcie.c
+@@ -105,8 +105,29 @@
+ 	if (pci->func->pcie.init)
+ 		pci->func->pcie.init(pci);
+ 
+-	if (pci->pcie.speed != -1)
++	if (pci->pcie.speed != -1) {
+ 		nvkm_pcie_set_link(pci, pci->pcie.speed, pci->pcie.width);
++	} else if (pci->func->pcie.cur_speed && pci->func->pcie.max_speed) {
++		enum nvkm_pcie_speed cur_speed = pci->func->pcie.cur_speed(pci);
++		enum nvkm_pcie_speed max_speed = pci->func->pcie.max_speed(pci);
++
++		/*
++		 * After a hard power-cycle (apple-gmux cutting the PCIe power
++		 * rails on the MacBookPro11,3) the dGPU link frequently trains
++		 * back at the lowest common speed (2.5GT/s) even though the
++		 * card supports 5GT/s: ->pcie.init() above already raised the
++		 * cap/lnkctl registers to the maximum, but nothing triggers a
++		 * retrain.  When no explicit speed was requested, retrain the
++		 * link to the maximum the card supports so a resumed GPU does
++		 * not silently regress to PCIe gen1.
++		 */
++		if (cur_speed >= NVKM_PCIE_SPEED_2_5 && cur_speed < max_speed) {
++			nvkm_debug(subdev, "retraining link from %s to %s\n",
++				   nvkm_pcie_speeds[cur_speed],
++				   nvkm_pcie_speeds[max_speed]);
++			nvkm_pcie_set_link(pci, max_speed, pci->pcie.width);
++		}
++	}
+ 
+ 	return 0;
+ }

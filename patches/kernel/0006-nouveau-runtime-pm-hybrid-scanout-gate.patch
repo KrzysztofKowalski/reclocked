@@ -1,0 +1,133 @@
+From 0006-nouveau-runtime-pm-hybrid Mon Sep 17 00:00:00 2001
+From: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+Date: Tue, 26 Aug 2026 00:00:00 +0200
+Subject: [PATCH 0006/0010] nouveau: runtime PM hybrid - scanout/master gate
+
+On the MacBookPro11,3 the discrete GT 750M (Kepler GK107) shares the
+retina eDP panel with the Intel iGPU through an apple-gmux.  The EFI
+gpu-power-prefs variable decides at boot which GPU drives the internal
+panel; until it is flipped to IGD, the dGPU is the boot/default VGA
+device and the only possible scanout engine.
+
+nouveau's runtime PM (nouveau.runpm=1) currently suspends the dGPU on
+autosuspend timeout regardless of what is on screen, blacking out the
+panel and making the card impossible to wake reliably on Kepler (the
+gmux power-cut is deeper than D3cold; see patch 0007).  The NVIDIA blob
+gates the same decision behind its dynamic-PM state machine and never
+suspends a GPU that still owns scanout.
+
+Add a scanout/master gate shared by nouveau_pmops_runtime_idle() and
+nouveau_pmops_runtime_suspend():
+
+* refuse to arm the autosuspend timer while the dGPU is the boot/default
+  VGA device (vga_default_device());
+* refuse while any DRM CRTC is enabled (crtc->enabled) - i.e. a real
+  scanout on eDP/HDMI/VGA is in flight.
+
+A concurrent modeset cannot race this check: every DRM ioctl is already
+wrapped in pm_runtime_get_sync()/pm_runtime_put_autosuspend() in
+nouveau_drm_ioctl(), so the suspend/idle callbacks only run while no
+modeset is executing and no client holds the device open.  Together with
+patch 6 this turns nouveau.runpm into a safe iGPU-primary / PRIME
+offload power-control path on this machine: the dGPU stays off when the
+panel is on the iGPU and comes up on demand for offload/render, exactly
+like the hybrid setup of an Optimus laptop.
+
+Signed-off-by: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+---
+ drivers/gpu/drm/nouveau/nouveau_drm.c |   51 +++++++++++++++++++++++++++++++++
+ 1 file changed, 51 insertions(+)
+
+--- a/drivers/gpu/drm/nouveau/nouveau_drm.c
++++ b/drivers/gpu/drm/nouveau/nouveau_drm.c
+@@ -28,12 +28,14 @@
+ #include <linux/pci.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/vga_switcheroo.h>
++#include <linux/vgaarb.h>
+ #include <linux/mmu_notifier.h>
+ #include <linux/dynamic_debug.h>
+ #include <linux/debugfs.h>
+ 
+ #include <drm/clients/drm_client_setup.h>
+ #include <drm/drm_drv.h>
++#include <drm/drm_crtc.h>
+ #include <drm/drm_fbdev_ttm.h>
+ #include <drm/drm_gem_ttm_helper.h>
+ #include <drm/drm_ioctl.h>
+@@ -1143,6 +1145,33 @@
+ 	return nouveau_runtime_pm == 1;
+ }
+ 
++/*
++ * nouveau_pm_runtime_scanout_active() - is the dGPU currently scanning out?
++ *
++ * A dGPU that is driving a display must never be runtime-suspended: cutting
++ * its power mid-scanout leaves the panel without a source.  On the
++ * MacBookPro11,3 the retina eDP panel stays wired to the discrete GPU until
++ * the EFI gpu-power-prefs variable selects the iGPU, so this gate is what
++ * makes nouveau.runpm safe in hybrid (iGPU-primary / PRIME offload) mode.
++ *
++ * No locking is needed here: a concurrent modeset holds a runtime PM
++ * reference (nouveau_drm_ioctl() wraps every ioctl in pm_runtime_get_sync()),
++ * so the suspend/idle callbacks cannot race an in-progress scanout setup.
++ */
++static bool
++nouveau_pm_runtime_scanout_active(struct nouveau_drm *drm)
++{
++	struct drm_device *dev = drm->dev;
++	struct drm_crtc *crtc;
++
++	drm_for_each_crtc(crtc, dev) {
++		if (crtc->enabled)
++			return true;
++	}
++
++	return false;
++}
++
+ static int
+ nouveau_pmops_runtime_suspend(struct device *dev)
+ {
+@@ -1155,6 +1184,18 @@
+ 		return -EBUSY;
+ 	}
+ 
++	/* Hybrid (iGPU-primary / PRIME offload) setups must not suspend the
++	 * dGPU while it is still driving a display or is the boot/default VGA
++	 * device.  On the MacBookPro11,3 the retina eDP panel is wired to the
++	 * discrete GPU until gpu-power-prefs is flipped to IGD, and a suspend
++	 * mid-scanout would black out the panel; return -EBUSY so the runtime
++	 * PM core retries after the autosuspend delay.
++	 */
++	if (vga_default_device() == pdev || nouveau_pm_runtime_scanout_active(drm)) {
++		NV_DEBUG(drm, "runtime suspend refused: dGPU still driving display\n");
++		return -EBUSY;
++	}
++
+ 	nouveau_switcheroo_optimus_dsm();
+ 	ret = nouveau_do_suspend(drm, true);
+ 	pci_save_state(pdev);
+@@ -1204,12 +1245,22 @@
+ static int
+ nouveau_pmops_runtime_idle(struct device *dev)
+ {
++	struct pci_dev *pdev = to_pci_dev(dev);
++	struct nouveau_drm *drm = pci_get_drvdata(pdev);
++
+ 	if (!nouveau_pmops_runtime()) {
+ 		pm_runtime_forbid(dev);
+ 		return -EBUSY;
+ 	}
+
++	/* Same gate as nouveau_pmops_runtime_suspend(): do not even arm the
++	 * autosuspend timer while the dGPU drives the display or is the boot
++	 * VGA device.
++	 */
++	if (vga_default_device() == pdev || nouveau_pm_runtime_scanout_active(drm))
++		return -EBUSY;
++
+ 	pm_runtime_mark_last_busy(dev);
+ 	pm_runtime_autosuspend(dev);
+ 	/* we don't want the main rpm_idle to call suspend - we want to autosuspend */
+ 	return 1;

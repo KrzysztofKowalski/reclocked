@@ -1,0 +1,114 @@
+From 0008-nouveau-pr3-d3hot Mon Sep 17 00:00:00 2001
+From: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+Date: Tue, 26 Aug 2026 00:00:00 +0200
+Subject: [PATCH 0008/0010] nouveau/acpi: handle missing _PR3 (D3hot fallback)
+
+nouveau's ACPI code only probes for the NVIDIA Optimus/v1-DSM _DSM
+functions, but the runtime PM suspend path unconditionally writes
+PCI_D3cold.  A genuine D3cold transition requires a _PR3 method on the
+PCIe slot (or its upstream bridge) that names the power resources to cut.
+The MacBookPro11,3 has no _PR0/_PR3/PowerResource in the whole DSDT/SSDT
+set (raport 41 section 6): the discrete GPU power is cut by the
+apple-gmux controller, not by ACPI.  On such machines the D3cold write is
+a fake that never reaches ACPI, while the card is torn down by gmux rails
+anyway (and the runtime resume relies on patch 0007 to come back).
+
+Add nouveau_pr3_present(), which checks the slot and its upstream bridge
+for a real _PR3, and use it in two places:
+
+* nouveau_dsm_pci_probe(): keep the _PR3 capability bit honest, so callers
+  do not believe D3cold is available when it is not;
+* nouveau_pmops_runtime_suspend(): only write PCI_D3cold when a real _PR3
+  exists, otherwise fall back to PCI_D3hot.  D3hot at least parks the PCIe
+  link before the gmux power-cut, and avoids the "Refused to change power
+  state" warnings from the no-op D3cold write on slots without power
+  resources.
+
+On MacBookPro11,3 nouveau.runpm now works the same way the NVIDIA blob's
+RM behaves on this platform: no ACPI D3cold, power controlled by the muxer.
+
+Signed-off-by: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+---
+ drivers/gpu/drm/nouveau/nouveau_acpi.c | 25 ++++++++++++++++++++++++-
+ drivers/gpu/drm/nouveau/nouveau_acpi.h |  2 ++
+ drivers/gpu/drm/nouveau/nouveau_drm.c  | 11 +++++++++-
+ 3 files changed, 36 insertions(+), 2 deletions(-)
+
+--- a/drivers/gpu/drm/nouveau/nouveau_acpi.c
++++ b/drivers/gpu/drm/nouveau/nouveau_acpi.c
+@@ -59,6 +59,29 @@
+ 	return nouveau_dsm_priv.dsm_detected;
+ }
+ 
++/*
++ * nouveau_pr3_present() - does the dGPU (or its upstream bridge) expose a
++ * _PR3 ACPI power resource?
++ *
++ * A genuine D3cold transition requires a _PR3 method that lists the power
++ * resources to be cut on the PCIe slot.  The MacBookPro11,3 has none: the
++ * DSDT/SSDT contain no _PR0/_PR3/PowerResource anywhere (raport 41, section 6) and
++ * the discrete GPU power is controlled exclusively by the apple-gmux power
++ * rails.  Writing PCI_D3cold without _PR3 is a no-op as far as ACPI is
++ * concerned, so this helper lets the runtime PM path pick a real D3hot
++ * instead of a fake D3cold.
++ */
++bool
++nouveau_pr3_present(struct pci_dev *pdev)
++{
++	struct pci_dev *parent = pci_upstream_bridge(pdev);
++
++	if (parent && parent->bridge_d3 && pci_pr3_present(parent))
++		return true;
++
++	return pci_pr3_present(pdev);
++}
++
+ #ifdef CONFIG_VGA_SWITCHEROO
+ static const guid_t nouveau_dsm_muid =
+ 	GUID_INIT(0x9D95A0A0, 0x0060, 0x4D48,
+@@ -227,7 +250,7 @@
+ 	parent_pdev = pci_upstream_bridge(pdev);
+ 	if (parent_pdev) {
+ 		if (parent_pdev->bridge_d3)
+-			*has_pr3 = pci_pr3_present(parent_pdev);
++			*has_pr3 = nouveau_pr3_present(pdev);
+ 		else
+ 			pci_d3cold_disable(pdev);
+ 	}
+--- a/drivers/gpu/drm/nouveau/nouveau_acpi.h
++++ b/drivers/gpu/drm/nouveau/nouveau_acpi.h
+@@ -7,6 +7,7 @@
+ #if defined(CONFIG_ACPI) && defined(CONFIG_X86)
+ bool nouveau_is_optimus(void);
+ bool nouveau_is_v1_dsm(void);
++bool nouveau_pr3_present(struct pci_dev *pdev);
+ void nouveau_register_dsm_handler(void);
+ void nouveau_unregister_dsm_handler(void);
+ void nouveau_switcheroo_optimus_dsm(void);
+@@ -16,6 +17,7 @@
+ #else
+ static inline bool nouveau_is_optimus(void) { return false; };
+ static inline bool nouveau_is_v1_dsm(void) { return false; };
++static inline bool nouveau_pr3_present(struct pci_dev *pdev) { return false; };
+ static inline void nouveau_register_dsm_handler(void) {}
+ static inline void nouveau_unregister_dsm_handler(void) {}
+ static inline void nouveau_switcheroo_optimus_dsm(void) {}
+--- a/drivers/gpu/drm/nouveau/nouveau_drm.c
++++ b/drivers/gpu/drm/nouveau/nouveau_drm.c
+@@ -1160,5 +1160,14 @@
+ 	pci_save_state(pdev);
+ 	pci_disable_device(pdev);
+ 	pci_ignore_hotplug(pdev);
+-	pci_set_power_state(pdev, PCI_D3cold);
++	/* Only write D3cold when a real _PR3 power resource exists on the
++	 * slot (or its upstream bridge).  On the MacBookPro11,3 the DSDT has
++	 * no _PR3 and the dGPU power is cut by the gmux rails instead, so
++	 * the D3cold write would be a fake that never reaches ACPI; fall
++	 * back to D3hot, which at least parks the link before the gmux cut.
++	 */
++	if (nouveau_pr3_present(pdev))
++		pci_set_power_state(pdev, PCI_D3cold);
++	else
++		pci_set_power_state(pdev, PCI_D3hot);
+ 	drm->dev->switch_power_state = DRM_SWITCH_POWER_DYNAMIC_OFF;
+ 

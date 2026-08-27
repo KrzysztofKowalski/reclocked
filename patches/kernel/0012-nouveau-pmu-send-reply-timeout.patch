@@ -1,0 +1,43 @@
+From 0012-nouveau-pmu-send-reply-timeout Mon Sep 17 00:00:00 2001
+From: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+Date: Tue, 26 Aug 2026 00:00:00 +0200
+Subject: [PATCH 0012/0013] pmu/gt215: timeout waiting for PMU reply
+
+gt215_pmu_send() waits for the PMU reply with an unbounded
+wait_event().  If the PMU is dead (e.g. the firmware never started
+because the D3hot->D0 transition failed on the MacBookPro11,3), every
+caller blocks forever: the kworker running the pstate work sleeps in D
+state indefinitely and the write syscall on the pstate file hangs.
+
+Bound the wait with a 2 s timeout; on expiry clear the stale reply slot
+and release the send mutex so the error propagates (-EIO) and later
+callers are not wedged behind a held mutex.  Callers already handle
+errors (e.g. nvkm_memx_init checks the return value).
+
+Signed-off-by: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+---
+ drivers/gpu/drm/nouveau/nvkm/subdev/pmu/gt215.c |   13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/pmu/gt215.c	2026-08-27 16:39:35.511907655 +0200
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/pmu/gt215.c	2026-08-27 16:39:38.519793396 +0200
+@@ -74,7 +74,18 @@
+ 
+ 	/* wait for reply, if requested */
+ 	if (reply) {
+-		wait_event(pmu->recv.wait, (pmu->recv.process == 0));
++		if (!wait_event_timeout(pmu->recv.wait,
++					pmu->recv.process == 0,
++					msecs_to_jiffies(2000))) {
++			/* PMU went silent (e.g. failed D3hot->D0 on the
++			 * MacBookPro11,3): clear the stale reply slot and
++			 * release the send mutex, otherwise every later
++			 * caller wedges in D state forever.
++			 */
++			pmu->recv.process = 0;
++			mutex_unlock(&pmu->send.mutex);
++			return -EIO;
++		}
+ 		reply[0] = pmu->recv.data[0];
+ 		reply[1] = pmu->recv.data[1];
+ 	}

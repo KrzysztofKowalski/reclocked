@@ -1,0 +1,77 @@
+From 0004-gmux-i915-switcheroo Mon Sep 17 00:00:00 2001
+From: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+Date: Tue, 26 Aug 2026 00:00:00 +0200
+Subject: [PATCH 0004/0005] platform/x86: apple-gmux: optional min-to-off
+ brightness quirk (opt-in)
+
+Analysis (see report 56, "Backlight analysis"): the kernel backlight
+stack already supports a real "off" for gmux_backlight:
+
+* /sys/class/backlight/gmux_backlight is registered on this machine,
+  because acpi_video_get_backlight_type() returns acpi_backlight_apple_gmux
+  (drivers/acpi/video_detect.c: apple_gmux_present is probed first).
+* backlight_device_set_brightness() passes 0 through unclamped
+  (drivers/video/backlight/backlight.c), and gmux_update_status() writes
+  the value straight to GMUX_PORT_BRIGHTNESS.
+* backlight_get_brightness() returns 0 whenever the backlight is blanked
+  (bl_power != BACKLIGHT_POWER_ON or BL_CORE_FBBLANK), so a DPMS/bl_power
+  power-off already writes 0 to the gmux.
+
+So writing brightness=0 already writes 0 to the gmux register; if the
+panel stays lit on Linux at the bottom of the slider, the cause is
+user-space clamping (DE/brightnessctl sending a non-zero "minimum"
+instead of 0), or a firmware/PWM behaviour of the LP854x backlight chip
+that macOS compensates for at the bottom of its slider.
+
+This patch adds an opt-in module parameter (apple_gmux.min_to_off=1)
+that maps the lowest ~1% of the brightness range to a hard off (write 0),
+which is the "map min -> 0" approach. It is deliberately opt-in because
+it changes behaviour and could not be tested read-only on this machine
+(writing the BRIGHTNESS register is out of scope). If a live test shows
+brightness=0 already extinguishes the panel, this patch is unnecessary
+and only the user-space side needs a keybind that writes 0.
+
+Signed-off-by: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+---
+ drivers/platform/x86/apple-gmux.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git i/drivers/platform/x86/apple-gmux.c w/drivers/platform/x86/apple-gmux.c
+index 9c728ac4e..919ebc32e 100644
+--- i/drivers/platform/x86/apple-gmux.c
++++ w/drivers/platform/x86/apple-gmux.c
+@@ -333,6 +333,14 @@ static void gmux_write32(struct apple_gmux_data *gmux_data, int port,
+  * .. _TI LP8545: https://www.ti.com/lit/ds/symlink/lp8545.pdf
+  */
+
++static bool gmux_min_to_off;
++module_param_named(min_to_off, gmux_min_to_off, bool, 0644);
++MODULE_PARM_DESC(min_to_off,
++		 "Map the lowest ~1% of the brightness range to a hard backlight "
++		 "off (write 0), like macOS does at the bottom of its brightness "
++		 "slider. Default: 0 (off). Experimental quirk for panels whose "
++		 "gmux PWM does not fully extinguish at brightness 1.");
++
+ static int gmux_get_brightness(struct backlight_device *bd)
+ {
+ 	struct apple_gmux_data *gmux_data = bl_get_data(bd);
+@@ -345,6 +353,17 @@ static int gmux_update_status(struct backlight_device *bd)
+ 	struct apple_gmux_data *gmux_data = bl_get_data(bd);
+ 	u32 brightness = backlight_get_brightness(bd);
+
++	/*
++	 * backlight_get_brightness() already collapses a blanked backlight
++	 * (bl_power != FB_BLANK_UNBLANK or BL_CORE_FBBLANK) to 0, so a DPMS
++	 * power-off is always written as 0. With min_to_off, also collapse
++	 * the lowest few non-zero steps (which user space / DEs commonly send
++	 * as "minimum") to 0 so the panel truly extinguishes.
++	 */
++	if (gmux_min_to_off && brightness > 0 &&
++	    brightness <= DIV_ROUND_UP(bd->props.max_brightness, 100))
++		brightness = 0;
++
+ 	gmux_write32(gmux_data, GMUX_PORT_BRIGHTNESS, brightness);
+
+ 	return 0;
+--
+2.46.0

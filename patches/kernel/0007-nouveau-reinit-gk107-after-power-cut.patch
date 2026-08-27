@@ -1,0 +1,136 @@
+From 0007-nouveau-reinit-gk107 Mon Sep 17 00:00:00 2001
+From: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+Date: Tue, 26 Aug 2026 00:00:00 +0200
+Subject: [PATCH 0007/0010] nouveau: reinit GK107 after hard power-cycle (gmux)
+
+On the MacBookPro11,3 the apple-gmux power-cycle tears down the core,
+VRAM and PCIe power rails of the GT 750M - a cut that is deeper than a
+plain D3 suspend.  Such a power-cycle wipes the device's VBIOS/option
+ROM and PCIe link training state, and nouveau's resume path (which only
+re-runs nvif_client_resume + VBIOS init) frequently leaves the card in
+an unrecoverable state: "VBIOS znika", stuck in D3, or a PCIe link-speed
+regression (raport 22 section B.4, raport 48 section 3).
+
+The NVIDIA blob handles this with a full RmInitAdapter re-init after a
+power cycle.  This patch gives nouveau the same resilience:
+
+1. nouveau_do_resume() now calls nouveau_bios_reinit() instead of plain
+   nouveau_run_vbios_init().  The new helper validates that the VBIOS
+   image shadowed into RAM at probe time is still present (it survives
+   the power-cut) and then re-runs the VBIOS init tables - the
+   DRM-layer equivalent of the RM "load VBIOS + re-init" sequence.
+   Re-shadowing is deliberately not attempted: the PCI ROM is unreadable
+   until the device is fully re-initialized.
+
+2. The runtime suspend path gets a udelay(200) after entering D3,
+   mirroring commit c5fd936 which added the same delay to the
+   system-suspend path.  Without it the GPU comes back "stuck in D3"
+   (all PCI reads return 0xffffffff).
+
+3. Both resume paths (runtime and system) get the same udelay(200) after
+   pci_set_power_state(pdev, PCI_D0) before the device is touched again.
+
+The pstate is restored automatically by the existing nvkm clock init
+(nvkm_clk_init() resets the runtime astate/dstate but preserves the user
+ustate_ac/dc), so no pstate work is needed here.
+
+Signed-off-by: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+---
+ drivers/gpu/drm/nouveau/nouveau_bios.c | 25 +++++++++++++++++++++++++
+ drivers/gpu/drm/nouveau/nouveau_bios.h |  1 +
+ drivers/gpu/drm/nouveau/nouveau_drm.c  | 18 +++++++++++++++++-
+ 3 files changed, 44 insertions(+), 1 deletion(-)
+
+--- a/drivers/gpu/drm/nouveau/nouveau_drm.c
++++ b/drivers/gpu/drm/nouveau/nouveau_drm.c
+@@ -1019,7 +1019,11 @@
+ 	if (drm->fence && nouveau_fence(drm)->resume)
+ 		nouveau_fence(drm)->resume(drm);
+ 
+-	nouveau_run_vbios_init(dev);
++	ret = nouveau_bios_reinit(dev);
++	if (ret) {
++		NV_ERROR(drm, "VBIOS reinit failed: %d\n", ret);
++		return ret;
++	}
+ 
+ 	if (dev->mode_config.num_crtc) {
+ 		NV_DEBUG(drm, "resuming display...\n");
+@@ -1066,6 +1070,7 @@
+ 		return 0;
+ 
+ 	pci_set_power_state(pdev, PCI_D0);
++	udelay(200);
+ 	pci_restore_state(pdev);
+ 	ret = pci_enable_device(pdev);
+ 	if (ret)
+@@ -1162,6 +1167,12 @@
+ 	pci_ignore_hotplug(pdev);
+ 	pci_set_power_state(pdev, PCI_D3cold);
+ 	drm->dev->switch_power_state = DRM_SWITCH_POWER_DYNAMIC_OFF;
++	/* The gmux power-cut on Apple laptops happens right after the PCI PM
++	 * state write; give the D3 state a moment to settle or the GPU comes
++	 * back "stuck in D3" after resume (same fix as commit c5fd936, which
++	 * added this delay to the system-suspend path on this hardware).
++	 */
++	udelay(200);
+ 	return ret;
+ }
+ 
+@@ -1179,6 +1190,12 @@
+ 	}
+ 
+ 	pci_set_power_state(pdev, PCI_D0);
++	/* Wait for the D0 transition to settle before touching the device: a
++	 * hard power-cycle wiped the VBIOS and PCIe link state, and accessing
++	 * the device immediately after the state write returns garbage reads
++	 * (all 0xff).  Same margin as the D3hot->power-cut delay above.
++	 */
++	udelay(200);
+ 	pci_restore_state(pdev);
+ 	ret = pci_enable_device(pdev);
+ 	if (ret)
+--- a/drivers/gpu/drm/nouveau/nouveau_bios.c
++++ b/drivers/gpu/drm/nouveau/nouveau_bios.c
+@@ -2060,6 +2060,31 @@
+ 	return 0;
+ }
+ 
++int
++nouveau_bios_reinit(struct drm_device *dev)
++{
++	struct nouveau_drm *drm = nouveau_drm(dev);
++	struct nvkm_bios *bios = nvxx_bios(drm);
++
++	/*
++	 * A hard power-cut (apple-gmux on the MacBookPro11,3 tears down the
++	 * core / VRAM / PCIe power rails, deeper than D3cold) wipes the
++	 * firmware state of the discrete GPU: the VBIOS/option ROM and the
++	 * PCIe link training are gone.  On resume the driver must bring the
++	 * card back from the VBIOS, the way the NVIDIA RM does in
++	 * RmInitAdapter after a power cycle.  The image shadowed into RAM at
++	 * probe time survives the cut, so validate it and re-run the init
++	 * tables.  Re-shadowing is deliberately not attempted here: the PCI
++	 * ROM is unreadable until the device has been fully re-initialized.
++	 */
++	if (!bios->data || !drm->vbios.data) {
++		NV_ERROR(drm, "VBIOS image missing after resume\n");
++		return -EIO;
++	}
++
++	return nouveau_run_vbios_init(dev);
++}
++
+ static bool
+ nouveau_bios_posted(struct drm_device *dev)
+ {
+--- a/drivers/gpu/drm/nouveau/nouveau_bios.h
++++ b/drivers/gpu/drm/nouveau/nouveau_bios.h
+@@ -164,6 +164,7 @@
+ int nouveau_bios_init(struct drm_device *);
+ void nouveau_bios_takedown(struct drm_device *dev);
+ int nouveau_run_vbios_init(struct drm_device *);
++int nouveau_bios_reinit(struct drm_device *);
+ struct dcb_connector_table_entry *
+ nouveau_bios_connector_entry(struct drm_device *, int index);
+ bool nouveau_bios_fp_mode(struct drm_device *, struct drm_display_mode *);

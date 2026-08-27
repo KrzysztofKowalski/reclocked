@@ -1,0 +1,86 @@
+From 0010-nouveau-gr-idle-gate Mon Sep 17 00:00:00 2001
+From: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+Date: Tue, 26 Aug 2026 00:00:00 +0200
+Subject: [PATCH 0010/0010] nouveau: gate runtime suspend on GR idle
+
+Cutting the power of the GT 750M while the graphics engine is still busy
+leaves the Kepler card in an unrecoverable state: the gmux power-cut is
+deeper than D3cold, and a mid-render cut makes the device impossible to
+re-initialize on resume (raport 22 section B.4).  The NVIDIA blob's dynamic-PM
+state machine never drops power while a client is active.
+
+Expose the existing GF100+ GR idle test as nvkm_gr_wait_idle() and gate
+nouveau_pmops_runtime_suspend() on it: if GR is busy or a context switch
+is in progress the function waits up to 2 s; if GR still is not idle it
+returns -EBUSY and the runtime PM core retries after the autosuspend
+delay instead of cutting power mid-render.
+
+Older (pre-Fermi) chips are left alone: they report busy through the same
+0x40060c bit but expose no context-switch-in-progress state, so the test
+is not reliable for them.
+
+Signed-off-by: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+---
+ drivers/gpu/drm/nouveau/include/nvkm/engine/gr.h |    1 +
+ drivers/gpu/drm/nouveau/nvkm/engine/gr/gf100.c   |   16 ++++++++++++++++
+ drivers/gpu/drm/nouveau/nouveau_drm.c            |   14 ++++++++++++++
+ 3 files changed, 31 insertions(+)
+
+--- a/drivers/gpu/drm/nouveau/include/nvkm/engine/gr.h
++++ b/drivers/gpu/drm/nouveau/include/nvkm/engine/gr.h
+@@ -29,6 +29,7 @@
+ 
+ u64 nvkm_gr_units(struct nvkm_gr *);
+ int nvkm_gr_tlb_flush(struct nvkm_gr *);
++int nvkm_gr_wait_idle(struct nvkm_gr *);
+ int nvkm_gr_ctxsw_pause(struct nvkm_device *);
+ int nvkm_gr_ctxsw_resume(struct nvkm_device *);
+ u32 nvkm_gr_ctxsw_inst(struct nvkm_device *);
+--- a/drivers/gpu/drm/nouveau/nvkm/engine/gr/gf100.c
++++ b/drivers/gpu/drm/nouveau/nvkm/engine/gr/gf100.c
+@@ -1075,6 +1075,22 @@
+ 	return -EAGAIN;
+ }
+ 
++int
++nvkm_gr_wait_idle(struct nvkm_gr *gr)
++{
++	/*
++	 * Wait for the graphics engine to go idle.  Only GF100+ expose the
++	 * context-switch-in-progress state that makes the test reliable;
++	 * older chips report busy through the same 0x40060c bit but cannot
++	 * distinguish a mid-context-switch from a real idle, so leave them
++	 * alone.
++	 */
++	if (gr->engine.subdev.device->card_type < NV_C0)
++		return 0;
++
++	return gf100_gr_wait_idle(gf100_gr(gr));
++}
++
+ void
+ gf100_gr_mmio(struct gf100_gr *gr, const struct gf100_gr_pack *p)
+ {
+--- a/drivers/gpu/drm/nouveau/nouveau_drm.c
++++ b/drivers/gpu/drm/nouveau/nouveau_drm.c
+@@ -1156,6 +1156,20 @@
+ 	}
+ 
+ 	nouveau_switcheroo_optimus_dsm();
++	/* Refuse to cut power while the GPU is still busy: a hard power-cut
++	 * (gmux rails) with GR busy leaves the device in an unrecoverable
++	 * state on Kepler.  Wait for GR to go idle and, if it never does,
++	 * bail out; the runtime PM core will retry after the autosuspend
++	 * delay.
++	 */
++	if (nvxx_gr(drm)) {
++		ret = nvkm_gr_wait_idle(nvxx_gr(drm));
++		if (ret) {
++			NV_DEBUG(drm, "GR not idle, deferring runtime suspend\n");
++			return -EBUSY;
++		}
++	}
++
+ 	ret = nouveau_do_suspend(drm, true);
+ 	pci_save_state(pdev);
+ 	pci_disable_device(pdev);

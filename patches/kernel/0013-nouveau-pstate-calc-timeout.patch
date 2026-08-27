@@ -1,0 +1,43 @@
+From 0013-nouveau-pstate-calc-timeout Mon Sep 17 00:00:00 2001
+From: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+Date: Tue, 26 Aug 2026 00:00:00 +0200
+Subject: [PATCH 0013/0013] clk: timeout waiting for pstate work
+
+nvkm_pstate_calc() waits for the async pstate work with an unbounded
+wait_event().  The work wedges when the PMU is dead (e.g. after a
+failed D3hot->D0 transition on the MacBookPro11,3, where gt215_pmu_send
+blocks on a PMU that never answers): the pstate writer then sleeps in D
+state forever and no later pstate write can ever succeed (raport 77).
+
+Bound the wait with a 2 s timeout; on expiry drop the waiting flag so
+the next writer is not stuck behind a stale "in flight" marker and log
+the failure.
+
+Signed-off-by: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+---
+ drivers/gpu/drm/nouveau/nvkm/subdev/clk/base.c |   14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/clk/base.c	2026-08-27 16:39:49.554374919 +0200
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/clk/base.c	2026-08-27 16:39:52.393267428 +0200
+@@ -351,8 +351,18 @@
+ {
+ 	atomic_set(&clk->waiting, 1);
+ 	schedule_work(&clk->work);
+-	if (wait)
+-		wait_event(clk->wait, !atomic_read(&clk->waiting));
++	if (wait) {
++		if (!wait_event_timeout(clk->wait,
++					!atomic_read(&clk->waiting),
++					msecs_to_jiffies(2000))) {
++			/* pstate work wedged (e.g. PMU dead after a failed
++			 * D3hot->D0): drop the flag so the next writer is
++			 * not stuck forever.
++			 */
++			atomic_set(&clk->waiting, 0);
++			nvkm_error(&clk->subdev, "pstate work timed out\n");
++		}
++	}
+ 	return 0;
+ }
+ 

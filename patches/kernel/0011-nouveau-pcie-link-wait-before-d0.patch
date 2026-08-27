@@ -1,0 +1,94 @@
+From 0011-nouveau-pcie-link-wait-before-d0 Mon Sep 17 00:00:00 2001
+From: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+Date: Tue, 26 Aug 2026 00:00:00 +0200
+Subject: [PATCH 0011/0013] nouveau: poll PCIe link before D0 resume
+
+On the MacBookPro11,3 a dGPU power-on through the gmux cuts the rails and
+leaves the PCIe link down: after gmux switches power back on, the link
+takes ~300 ms to re-train (DLActive), and until then all config reads
+return 0xffffffff.  pci_power_up() reads PMCSR before applying any
+transition delay and fails immediately with -EIO ("Unable to change
+power state from D3hot to D0, device inaccessible").  The -EIO is
+silently ignored by nouveau_pmops_resume()/nouveau_pmops_runtime_resume()
+and the dead PMU that follows wedges pstate writes in D state forever
+(raport 77).
+
+Add nouveau_pci_resume() which polls the config space (PCI_VENDOR_ID)
+until the device answers (up to 2 s, 50 ms steps) and only then calls
+pci_set_power_state(pdev, PCI_D0); pci_power_up() applies the mandatory
+10 ms D3hot->D0 delay (pci_dev_d3_sleep) internally, so the old ad-hoc
+udelay(200) is no longer needed.  Both resume paths now fail loudly
+instead of continuing against a dead device.
+
+Signed-off-by: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+---
+ drivers/gpu/drm/nouveau/nouveau_drm.c |   44 ++++++++++++++++++++++++++-------
+ 1 file changed, 35 insertions(+), 9 deletions(-)
+
+--- a/drivers/gpu/drm/nouveau/nouveau_drm.c	2026-08-27 16:39:01.417208535 +0200
++++ b/drivers/gpu/drm/nouveau/nouveau_drm.c	2026-08-27 16:39:11.926806392 +0200
+@@ -1060,6 +1060,35 @@
+ 	return 0;
+ }
+ 
++/*
++ * Bring the dGPU back to PCI_D0 after a hard power-cycle (gmux cut the
++ * rails on the MacBookPro11,3).  pci_power_up() reads PMCSR before any
++ * transition delay and fails with -EIO ("Unable to change power state
++ * from D3hot to D0, device inaccessible") while the PCIe link is still
++ * training: config reads return 0xffffffff until DLActive (~300 ms).
++ * Poll until the device answers, then pci_power_up() applies the
++ * mandatory 10 ms D3hot->D0 delay (pci_dev_d3_sleep) internally.
++ */
++static int nouveau_pci_resume(struct pci_dev *pdev)
++{
++	u32 id;
++	int ret, i;
++
++	for (i = 0; i < 40; i++) {		/* 40 * 50 ms = 2 s max */
++		pci_read_config_dword(pdev, PCI_VENDOR_ID, &id);
++		if (!PCI_POSSIBLE_ERROR(id))
++			break;			/* link up, device answers */
++		msleep(50);
++	}
++	if (PCI_POSSIBLE_ERROR(id))
++		return -EIO;			/* still down after 2 s */
++
++	ret = pci_set_power_state(pdev, PCI_D0);
++	if (ret < 0 && ret != -EIO)
++		return ret;
++	return ret == -EIO ? -EIO : 0;
++}
++
+ int
+ nouveau_pmops_resume(struct device *dev)
+ {
+@@ -1071,8 +1100,9 @@
+ 	    drm->dev->switch_power_state == DRM_SWITCH_POWER_DYNAMIC_OFF)
+ 		return 0;
+ 
+-	pci_set_power_state(pdev, PCI_D0);
+-	udelay(200);
++	ret = nouveau_pci_resume(pdev);
++	if (ret)
++		return ret;
+ 	pci_restore_state(pdev);
+ 	ret = pci_enable_device(pdev);
+ 	if (ret)
+@@ -1253,13 +1283,9 @@
+ 		return -EBUSY;
+ 	}
+ 
+-	pci_set_power_state(pdev, PCI_D0);
+-	/* Wait for the D0 transition to settle before touching the device: a
+-	 * hard power-cycle wiped the VBIOS and PCIe link state, and accessing
+-	 * the device immediately after the state write returns garbage reads
+-	 * (all 0xff).  Same margin as the D3hot->power-cut delay above.
+-	 */
+-	udelay(200);
++	ret = nouveau_pci_resume(pdev);
++	if (ret)
++		return ret;
+ 	pci_restore_state(pdev);
+ 	ret = pci_enable_device(pdev);
+ 	if (ret)

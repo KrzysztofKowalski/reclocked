@@ -1,0 +1,94 @@
+From 0003-gmux-i915-switcheroo Mon Sep 17 00:00:00 2001
+From: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+Date: Tue, 26 Aug 2026 00:00:00 +0200
+Subject: [PATCH 0003/0005] platform/x86: apple-gmux: harden discrete GPU
+ power-on sequence and detect power-cycle
+
+gmux_set_discrete_state() currently writes the DISCRETE_POWER sequence
+(1 -> 3 for ON, 1 -> 0 for OFF), waits at most 200 ms for the GPE
+(powerchange_done) and unconditionally returns 0. Two gaps:
+
+1. The power-on is never verified. If the GPE times out or the rail
+   sequence fails to latch, the driver proceeds as if the GPU is up,
+   and the subsequent client resume fails with a dead card. Read back
+   GMUX_PORT_DISCRETE_POWER after the wait: it latches the requested
+   value (0x03 = ON, 0x00 = OFF) once the microcontroller has finished
+   sequencing the core/VRAM/PCIe rails, so it doubles as a status check.
+
+2. Nothing tells the rest of the stack that the GPU went through a hard
+   power-cycle. On the MacBookPro11,3 the gmux cut is deeper than D3cold
+   and wipes the VBIOS/PCIe link state; the bound DRM client must reload
+   it. Track the previous state and, on an OFF->ON transition, log the
+   event. The actual client notification is done by vga_switcheroo right
+   after ->power_state() returns (see the vga_switcheroo reinit callback
+   patch), because the handler API only knows client IDs, not pci_devs.
+
+Read-only note: on this machine a live test was not performed (writing
+the DISCRETE_POWER register is out of scope for the read-only research).
+
+Signed-off-by: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+---
+ drivers/platform/x86/apple-gmux.c | 29 ++++++++++++++++++++++++++++-
+ 1 file changed, 29 insertions(+), 1 deletion(-)
+
+diff --git i/drivers/platform/x86/apple-gmux.c w/drivers/platform/x86/apple-gmux.c
+index 9c728ac4e..d92c435cc 100644
+--- i/drivers/platform/x86/apple-gmux.c
++++ w/drivers/platform/x86/apple-gmux.c
+@@ -510,6 +510,9 @@ static int gmux_switch_ddc(enum vga_switcheroo_client_id id)
+ static int gmux_set_discrete_state(struct apple_gmux_data *gmux_data,
+ 				   enum vga_switcheroo_state state)
+ {
++	enum vga_switcheroo_state old_state = gmux_data->power_state;
++	u8 power;
++
+ 	reinit_completion(&gmux_data->powerchange_done);
+
+ 	if (state == VGA_SWITCHEROO_ON) {
+@@ -522,13 +525,42 @@ static int gmux_set_discrete_state(struct apple_gmux_data *gmux_data,
+ 		pr_debug("Discrete card powered down\n");
+ 	}
+
+-	gmux_data->power_state = state;
+-
++	/*
++	 * Wait for the GPE (powerchange_done) to signal that the gmux
++	 * microcontroller has finished sequencing the core/VRAM/PCIe power
++	 * rails. The timeout is 200 ms, matching the firmware's expected
++	 * power-change latency.
++	 */
+ 	if (gmux_data->gpe >= 0 &&
+ 	    !wait_for_completion_interruptible_timeout(&gmux_data->powerchange_done,
+ 						       msecs_to_jiffies(200)))
+ 		pr_warn("Timeout waiting for gmux switch to complete\n");
+
++	/*
++	 * Read back the latched power state. GMUX_PORT_DISCRETE_POWER holds
++	 * the value once the rail sequencing has finished (0x03 = ON,
++	 * 0x00 = OFF), so this doubles as a power status check: it catches a
++	 * GPE that timed out or a rails sequence that failed to latch.
++	 */
++	power = gmux_read8(gmux_data, GMUX_PORT_DISCRETE_POWER);
++	if ((state == VGA_SWITCHEROO_ON && power != 3) ||
++	    (state == VGA_SWITCHEROO_OFF && power != 0))
++		pr_warn("Discrete card power state mismatch: wanted %s, read 0x%02x\n",
++			state == VGA_SWITCHEROO_ON ? "ON" : "OFF", power);
++
++	gmux_data->power_state = state;
++
++	/*
++	 * A hard power-cycle (OFF -> ON) wipes the discrete GPU's firmware
++	 * state (VBIOS, PCIe link training). vga_switcheroo notifies the
++	 * bound client via its ->reinit callback right after our
++	 * ->power_state() handler returns, so the driver can reload the
++	 * VBIOS before resuming. Log the transition here so it is easy to
++	 * correlate in dmesg.
++	 */
++	if (old_state == VGA_SWITCHEROO_OFF && state == VGA_SWITCHEROO_ON)
++		pr_info("Discrete card was power-cycled, client reinit required\n");
++
+ 	return 0;
+ }
+
+--
+2.46.0
