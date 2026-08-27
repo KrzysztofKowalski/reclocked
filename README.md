@@ -163,6 +163,18 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   auto-mode — a manual fan override keeps priority. When the build ends, fans
   return to the temperature curve. Config: `[compiler]` (`enable` / `fan-max`
   / `names`).
+- 🔀 **switchd — dGPU power-state + render routing (v5.0)**: an optional
+  power-state module for dual-GPU Apple machines (Intel iGPU + NVIDIA dGPU on
+  a `gmux` mux). In DIS topology (dGPU drives the panel) it runs in MONITOR
+  mode — no power changes (power-off is blocked by the scanout gate). The
+  power executor activates after a **boot-time** switch to IGD
+  (`gpu-power-prefs` via `reclockctl to-igd` + reboot; live mux switching is
+  out of scope). Soft promotion is busy-gated, hard promotion comes from
+  `[dgpu-hard]` window classes / `[dgpu-procs]` processes, demotion from
+  `[igpu]`. `pstate-settle-ms` waits out the GPU clock settle after power-on
+  (first clock change after D3hot→D0 can hang the nouveau workqueue),
+  `pstate-write-timeout-ms` timeouts a stuck pstate write. CLI:
+  `reclockctl switch-status | dgpu-on | dgpu-off | dgpu-auto | to-igd | to-dis`.
 - 🌡 **Per-profile thermal guard**: thermal downclock is **per-profile**, not
   global. `default` throttles at 65°C / recovers below 58°C; `preferred`
   throttles at 82°C / recovers below 75°C. Thermal down is prioritized over
@@ -240,11 +252,11 @@ reclocked/
 ├── README.md                       this file
 ├── .gitignore
 ├── reclockd/
-│   ├── reclockd.cpp                daemon source (~1690 lines, C++17)
+│   ├── reclockd.cpp                daemon source (~3070 lines, C++17)
 │   ├── Makefile                    builds ./reclockd (no libdrm link)
-│   ├── reclockd.conf               default config (profiles, thresholds)
+│   ├── reclockd.conf               default config (profiles, thresholds, [switch])
 │   ├── reclockd.service            systemd unit (installs to /etc/systemd/system/)
-│   └── reclockctl                  CLI wrapper for systemctl + pstate.sh
+│   └── reclockctl                  CLI wrapper for systemctl + pstate.sh (+ switchd)
 ├── patches/
 │   ├── 0001-nouveau-auto-reclock.patch   nouveau kernel auto-reclock policy
 │   ├── 0002-mesa-nvc0-sched-data.patch   Mesa nvc0 scheduler latency data
@@ -253,12 +265,16 @@ reclocked/
 │   ├── 0005-reclockd-compiler-fan.patch  reclockd v4.6 compiler detected → fans 100%
 │   ├── 81-nouveau-kepler.rules           udev rule: force-load nouveau (bypass nvidia-utils blacklist)
 │   ├── reclockd.conf-caps.diff           reclockd.conf diff — [caps] Discord 0a/0e busy-gated
-│   └── reclockd.conf-compiler.diff       reclockd.conf diff — [compiler] fan boost
+│   ├── reclockd.conf-compiler.diff       reclockd.conf diff — [compiler] fan boost
+│   └── kernel/                           MacBook Pro 11,3 kernel series 0002-0013
 ├── install-udev-rule.sh            installs the udev rule above
-├── pstate.sh                       inspect/force pstate via debugfs (+ override)
+├── pstate.sh                       inspect/force pstate via debugfs (+ iGPU RPS / coretemp)
 ├── build-mesa.sh                   build patched Mesa (nouveau-only)
 ├── mesa-manage.sh                  install/rollback patched Mesa driver
-└── recover-gpu.sh                  emergency recovery if display breaks
+├── recover-gpu.sh                  emergency recovery if display breaks
+├── build-kernel.sh                 build + install the patched nvkp kernel
+├── build-uki-nvkp.sh               build UKI (vmlinuz+initramfs+cmdline) for Limine protocol: efi
+└── bench-gpu.sh                    repeatable glmark2 iGPU-vs-dGPU benchmark (full-res, offscreen)
 ```
 
 ---
@@ -416,6 +432,58 @@ Boost only applies in **auto-mode** — a manual override (`reclockctl fan-off`,
 `fan: KOMPILATOR wykryty (cc1) -> fan1=... fan2=... (boost 100%)`); when the
 build finishes, fans return to the curve.
 
+### 🔀 switchd — dGPU power-state + render routing (v5.0)
+
+Optional power-state module for dual-GPU Apple machines (Intel iGPU + NVIDIA
+dGPU joined by a `gmux` mux). In the default DIS topology (dGPU drives the
+panel) it runs in **MONITOR** mode — it reads status but never touches power
+(a power-off would black the panel; the scanout gate blocks it). The power
+executor activates only after a **boot-time** switch to IGD
+(`gpu-power-prefs` = IGD via `reclockctl to-igd` + reboot); live mux switching
+is out of scope for the gmux.
+
+`[switch]` section:
+
+| key | default | meaning |
+|---|---|---|
+| `enable` | `true` | 1/0 — module on/off |
+| `tick-ms` | `1000` | decision tick (== `poll-ms`) |
+| `dwell-in-ms` | `3000` | entry dwell for soft promotion (busy-gated) |
+| `dwell-out-ms` | `5000` | exit dwell for demote |
+| `min-residence-ms` | `20000` | minimum time on the dGPU after promotion (anti-flapping) |
+| `cooldown-ms` | `45000` | cooldown after demote before a new promotion |
+| `wait-ready-ms` | `2000` | timeout for the wait after power-off |
+| `min-switch-gap-ms` | `10000` | minimum gap between power toggles |
+| `temp-gate` | `82` | °C — don't promote when the dGPU is hotter |
+| `busy-enter` | `80` | busy% for soft promotion |
+| `busy-exit` | `40` | busy% for demote |
+| `pstate-settle-ms` | `10000` | don't write pstate after power-on — GPU clock settle after D3hot→D0 (the first clock change can hang the nouveau workqueue) |
+| `pstate-write-timeout-ms` | `2000` | pstate write runs in a separate thread; on timeout the daemon stays alive and pauses pstate writes |
+
+`[dpower]` — power backend:
+
+| key | default | meaning |
+|---|---|---|
+| `backend` | `manual` | `manual` (echo ON/OFF to vgaswitcheroo) or `runpm` (`power/control`) |
+| `autosuspend-ms` | `5000` | autosuspend delay for `runpm` |
+| `wait-idle-timeout-ms` | `5000` | `/proc` fd scan before power-off (open `/dev/dri`) |
+| `wait-ready-timeout-ms` | `10000` | nouveau reinit timeout after power-on (`runtime_status=active`) |
+
+What promotes / demotes:
+
+- `[dgpu-hard]` — window classes that force the dGPU on (hard promotion, no
+  busy gate): `game`, `blender`, `steam`.
+- `[dgpu-soft]` — classes with busy-gated soft promotion (empty by default).
+- `[igpu]` — classes always kept on the iGPU (demotion): `foot`, `kitty`,
+  `alacritty`.
+- `[dgpu-procs]` — process names (`/proc/*/comm` scan) that require the dGPU:
+  `cuda`, `blender`.
+
+**Verify:** `reclockctl switch-status` shows topology, dGPU power, target, last
+action and `nvram_prefs`. When the dGPU is OFF, `pstate.sh set` refuses to
+write — a pstate write on a power-cut card hangs nouveau (see the
+`patches/kernel/` series below).
+
 ### `[low-power]` section
 
 Window classes that force the `default` profile (cap `07`) with priority over
@@ -526,14 +594,20 @@ suppress IDLE, override busy) > class / running-busy (busy-gated) > IDLE.**
 ### `reclockctl` — daemon control
 
 ```sh
-reclockctl start     # systemctl start reclockd
-reclockctl stop      # systemctl stop reclockd (restores exit-state, SMC fan auto)
-reclockctl status    # systemd status + pstate + temp + override + fans
-reclockctl restart   # systemctl restart reclockd
-reclockctl reload    # SIGHUP — re-read /etc/reclockd.conf without restart
-reclockctl logs      # journalctl -u reclockd -f
-reclockctl fan-off   # freeze auto fan control (drive fans manually via sysfs)
-reclockctl fan-on    # resume auto fan control
+reclockctl start          # systemctl start reclockd
+reclockctl stop           # systemctl stop reclockd (restores exit-state, SMC fan auto)
+reclockctl status         # systemd status + pstate + temp + override + fans
+reclockctl restart        # systemctl restart reclockd
+reclockctl reload         # SIGHUP — re-read /etc/reclockd.conf without restart
+reclockctl logs           # journalctl -u reclockd -f
+reclockctl fan-off        # freeze auto fan control (drive fans manually via sysfs)
+reclockctl fan-on         # resume auto fan control
+reclockctl switch-status  # v5.0 switchd: topology, dGPU power, target, nvram_prefs
+reclockctl dgpu-on        # v5.0 switchd override: force dGPU power ON
+reclockctl dgpu-off       # v5.0 switchd override: force dGPU power OFF
+reclockctl dgpu-auto      # v5.0 switchd: clear override, back to auto policy
+reclockctl to-igd         # v5.0: NVRAM gpu-power-prefs=IGD + reboot (boot-time switch)
+reclockctl to-dis         # v5.0: NVRAM gpu-power-prefs=DIS + reboot
 ```
 
 ### `pstate.sh` — manual pstate inspection / override
@@ -616,6 +690,35 @@ sudo udevadm control --reload-rules
 # reboot, albo natychmiast: sudo modprobe nouveau
 ```
 
+### `patches/kernel/` — MacBook Pro 11,3 kernel series (0002-0013)
+
+Kernel patch series for the dual-GPU MacBook Pro 15" Late 2013 (Intel iGPU +
+NVIDIA GT 750M on a `gmux` mux). Applied in order by `build-kernel.sh` to a
+Linux v7.1.8 tree (`0001` from `patches/` first, then `0002`-`0013`):
+
+| patch | area | fix |
+|---|---|---|
+| `0002` | gmux/i915 | vga_switcheroo reinit callback for the panel |
+| `0003` | gmux/i915 | apple-gmux power-cycle |
+| `0004` | gmux/i915 | backlight minimum → off |
+| `0005` | gmux/i915 | eDP link DPCD retry |
+| `0006` | nouveau | runtime PM hybrid scanout gate |
+| `0007` | nouveau | reinit GK107 after power-cut (power-on) |
+| `0008` | nouveau | ACPI no-PR3 → D3hot fallback |
+| `0009` | nouveau | PCIe link retrain after resume |
+| `0010` | nouveau | GR-idle gate for runtime suspend |
+| `0011` | nouveau | poll PCIe link before D0 |
+| `0012` | nouveau | PMU reply timeout (`gt215_pmu_send`) |
+| `0013` | nouveau | pstate calc timeout (`nvkm_pstate_calc`) |
+
+`0011`-`0013` fix a real hang: after a power-on (gmux power-cut → D3hot→D0),
+`pci_power_up` reads PMCSR before the PCIe link has trained, gets
+`0xFFFFFFFF` and returns `-EIO`; the PMU then never answers and both
+`gt215_pmu_send` and `nvkm_pstate_calc` wait forever in `wait_event` — D-state
+kernel threads, black screen. `0011` polls the link up to 2 s before D0 in
+both resume paths; `0012`/`0013` add 2 s timeouts to the PMU reply and the
+pstate workqueue as a safety net.
+
 ---
 
 ## 🛠 Scripts
@@ -624,7 +727,10 @@ sudo udevadm control --reload-rules
 
 Inspect or force the GPU pstate through debugfs, integrated with the daemon's
 override flag-file. `set` creates `/run/reclockd/override` and freezes auto
-mode; `auto` clears it. Requires root for the debugfs write.
+mode; `auto` clears it. Requires root for the debugfs write. v5.0 additions:
+when the dGPU is OFF (switchd), `status` falls back to the CPU `coretemp`
+temperature and also shows the iGPU RPS monitoring (read-only), and `set`
+refuses to write pstate — a pstate write on a power-cut card hangs nouveau.
 
 ### `build-mesa.sh`
 
@@ -661,6 +767,44 @@ a TTY when the screen is black.
 ./recover-gpu.sh                 # revert, no reboot
 ./recover-gpu.sh --reboot        # revert, then reboot
 ./recover-gpu.sh --dedicated     # also undo gpu-switch mux
+```
+
+### `build-kernel.sh`
+
+Builds and installs the patched nvkp kernel (`LOCALVERSION=-nvkp`) as a
+**separate** boot entry — never overwrites the running kernel: modules go to
+`/lib/modules/<rev>-nvkp`, `/boot` gets `vmlinuz-linux-nvkp`,
+`initramfs-linux-nvkp.img` and `System.map-linux-nvkp`; the bootloader entry is
+GRUB (`grub-mkconfig`) or Limine (`--limine`). Applies the full patch series
+(`0001` → `0013`, see `patches/kernel/`). Options: `--jobs=N`, `--no-install`,
+`--clean`, `--full-tree`. Build heat is covered by the daemon's `[compiler]`
+fan boost.
+
+```sh
+./build-kernel.sh --full-tree --limine
+```
+
+### `build-uki-nvkp.sh`
+
+Builds a Unified Kernel Image (UKI) from the nvkp kernel: regenerates the
+initramfs with the `encrypt` hook + LUKS keyfile, packs vmlinux + initramfs +
+embedded cmdline into one `/boot/EFI/Linux/nvkp.efi`, and registers a Limine
+`protocol: efi` entry (`//nvkp`). Needed because Limine's `protocol: efi` does
+**not** pass initramfs — and the legacy `protocol: linux` path boots to a black
+screen on this hardware (VGA console on a powered-off dGPU vs efifb on the
+iGPU).
+
+### `bench-gpu.sh`
+
+Repeatable glmark2 benchmark comparing the iGPU (Intel Iris Pro 5200) and the
+dGPU (GT 750M) at full panel resolution (default `2880x1800`). Offscreen mode
+(`--frame-end none --swap-mode immediate`) removes the PRIME copyback and the
+compositor vsync that corrupt on-screen numbers; the dGPU pstate is pinned via
+debugfs (`0e`/`0a`/`07`) with the daemon stopped. Fans forced to 100%, a
+`trap` restores everything on exit. `--dry-run` prints the commands.
+
+```sh
+sudo ./bench-gpu.sh -g both -m offscreen -p all
 ```
 
 ---
