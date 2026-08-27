@@ -150,6 +150,14 @@
 //      cichsza: wiatraki wchodzą na max dopiero przy 91°C zamiast 67°C. Gdy dGPU
 //      ON → krzywa standardowa temp-min/temp-max (51/91). Wybór krzywej wg
 //      sw.dgpu_off() (stan power dGPU), niezależny od topologii.
+//
+// v5.3 (2026-08-28):
+//   P. NVRAM CACHE: cache gpu-power-prefs do /run/reclockd/nvram-prefs. Skan
+//      raw flash (/dev/mtd0ro) przy każdym starcie gasi kbd backlight (odczyt
+//      MTD → ledtrig_mtd_activity → trigger "nand-disk" na smc::kbd_backlight
+//      → oneshot blink → LKSB=0; raport 80). /run to tmpfs — cache resetuje
+//      się przy reboot (poprawne: prefs zmienia się tylko przez firmware przy
+//      to-igd/to-dis + reboot).
 
 #include <algorithm>
 #include <atomic>
@@ -1946,13 +1954,29 @@ static std::string nvram_prefs_efivarfs()
 }
 
 // Pełny odczyt: efivarfs → raw flash. Wynik "dis"|"igd"|"unknown".
+//
+// v5.3: cache do /run/reclockd/nvram-prefs. Skan raw flash (/dev/mtd0ro) przy
+// każdym starcie gasi kbd backlight: każdy odczyt MTD → ledtrig_mtd_activity()
+// → trigger "nand-disk" na smc::kbd_backlight (applesmc.c:1071) → oneshot blink
+// zostawia LED na 0 → LKSB=0 (raport 80). /run to tmpfs — cache resetuje się
+// przy reboot, co jest poprawne (gpu-power-prefs zmienia się tylko przez
+// firmware przy to-igd/to-dis + reboot). Flash czytany tylko gdy cache brakuje.
+static const char* NVRAM_PREFS_CACHE = "/run/reclockd/nvram-prefs";
+
 static std::string nvram_prefs_read()
 {
+    std::string cached;
+    if (read_file(NVRAM_PREFS_CACHE, cached) == 0) {
+        cached = trim(cached);
+        logf(1, "nvram: cache %s (%s)", NVRAM_PREFS_CACHE, cached.c_str());
+        return cached.empty() ? "unknown" : cached;
+    }
+    logf(1, "nvram: brak cache %s — skan efivarfs → raw flash", NVRAM_PREFS_CACHE);
     std::string r = nvram_prefs_efivarfs();
-    if (!r.empty()) return r;
-    r = nvram_prefs_flash();
-    if (!r.empty()) return r;
-    return "unknown";
+    if (r.empty()) r = nvram_prefs_flash();
+    if (r.empty()) r = "unknown";
+    write_file(NVRAM_PREFS_CACHE, r);   // best-effort — cache to tylko optymalizacja
+    return r;
 }
 
 // iGPU (Intel Iris Pro 5200) — read-only monitoring (Opcja A, zero kontroli).
@@ -1996,8 +2020,10 @@ public:
     {
         topo_.detect();
         power_state_ = power_.read();
-        nvram_prefs_ = nvram_prefs_read();
+        // v5.3: mkdir przed nvram_prefs_read — katalog /run/reclockd musi istnieć
+        // zanim cache nvram-prefs zapisze do niego plik.
         mkdir("/run/reclockd", 0755);
+        nvram_prefs_ = nvram_prefs_read();
         mkdir("/run/switchd", 0755);
         logf(1, "switchd: topologia=%s, dGPU=%s, nvram_prefs=%s, backend=%s, "
                 "target=%s (w DIS = monitor — zero zmian power)",
@@ -2273,7 +2299,7 @@ private:
 static void usage(const char* argv0)
 {
     std::printf(
-        "reclockd v5.1 — polityka profilowa (app-aware) + wentylatory + switchd + override + reload\n"
+        "reclockd v5.3 — polityka profilowa (app-aware) + wentylatory + switchd + override + reload + nvram cache\n"
         "Użycie: %s [opcje]\n"
         "  switchd (v5.0): dGPU power-state + render routing. W DIS = monitor\n"
         "    (zero zmian power). Sekcje [switch]/[dpower]/[dgpu-hard]/[dgpu-soft]\n"
@@ -2565,7 +2591,7 @@ int main(int argc, char** argv)
     int prev_fan_rpm1 = -1, prev_fan_rpm2 = -1;
     bool prev_fan_override = false;
 
-    logf(1, "start v5.1: interval=%dms poll=%dms, "
+    logf(1, "start v5.3: interval=%dms poll=%dms, "
             "default[cap=%s temp-up=%d temp-down=%d], "
             "preferred[cap=%s boost=%s busy-boost=%d%% boost-dwell=%dms "
             "temp-up=%d temp-down=%d], "

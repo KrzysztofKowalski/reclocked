@@ -7,11 +7,13 @@
 #   - bootloader   → GRUB (grub-mkconfig) albo Limine (wpis automatyczny z --limine)
 #
 # Kluczowy patch: 0007-nouveau-reinit-gk107-after-power-cut.patch — reinit GK107
-# po power-cut (power-on switchd v5.0). Kolejność patchy: 0001 → 0014.
+# po power-cut (power-on switchd v5.0). Kolejność patchy: 0001 → 0015.
 # 0011-0013 = fix zawieszenia pstate po D3hot→D0 (poll linku PCIe przed D0,
 #             timeout reply PMU, timeout pstate work — raport 77).
 # 0014 = IRQ_HANDLED dla prywatnej linii MSI — fix 'Disabling IRQ #91' przy burzy
 #        nonstall fence notify (patrz NOTES.md, sekcja IRQ #91).
+# 0015 = applesmc: kbd backlight bez default_trigger "nand-disk" — fix gasnącego
+#        podświetlenia klawiatury przy odczycie MTD (raport 80).
 #
 # Termika: kompilacja grzeje — reclockd [compiler] wykrywa gcc/make i podkręca
 # wentylatory do 100% samoczynnie → pełne -j$(nproc) jest bezpieczne.
@@ -103,7 +105,7 @@ cfg_state() {
 }
 
 # --- patche ---
-# Kolejność 0001→0014 z patches/kernel/; 0001 leży w patches/ (nie kernel/) —
+# Kolejność 0001→0015 z patches/kernel/; 0001 leży w patches/ (nie kernel/) —
 # szukaj w obu miejscach.
 PATCH_NAMES=(
   0001-nouveau-auto-reclock.patch
@@ -120,6 +122,7 @@ PATCH_NAMES=(
   0012-nouveau-pmu-send-reply-timeout.patch
   0013-nouveau-pstate-calc-timeout.patch
   0014-nouveau-irq-msi-handled.patch
+  0015-applesmc-kbd-backlight-no-trigger.patch
 )
 
 find_patch() {
@@ -178,7 +181,7 @@ check_full_tree() {
 }
 
 # ==========================================================================
-echo "=== nv-kepler: budowa jądra z LOCALVERSION=$LOCALVERSION (switchd v5.0, patch 0007 = reinit GK107, 0011-0013 = fix D3hot→D0 hang, 0014 = IRQ MSI handled)"
+echo "=== nv-kepler: budowa jądra z LOCALVERSION=$LOCALVERSION (switchd v5.0, patch 0007 = reinit GK107, 0011-0013 = fix D3hot→D0 hang, 0014 = IRQ MSI handled, 0015 = kbd backlight no trigger)"
 echo "=== src: $SRC"
 
 [ -d "$SRC/.git" ] || die "$SRC nie jest klonem git (brak .git)"

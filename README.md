@@ -284,7 +284,7 @@ reclocked/
 │   ├── 81-nouveau-kepler.rules           udev rule: force-load nouveau (bypass nvidia-utils blacklist)
 │   ├── reclockd.conf-caps.diff           reclockd.conf diff — [caps] Discord 0a/0e busy-gated
 │   ├── reclockd.conf-compiler.diff       reclockd.conf diff — [compiler] fan boost
-│   └── kernel/                           MacBook Pro 11,3 kernel series 0002-0014
+│   └── kernel/                           MacBook Pro 11,3 kernel series 0002-0015
 ├── install-udev-rule.sh            installs the udev rule above
 ├── pstate.sh                       inspect/force pstate via debugfs (+ iGPU RPS / coretemp)
 ├── build-mesa.sh                   build patched Mesa (nouveau-only)
@@ -719,11 +719,11 @@ sudo udevadm control --reload-rules
 # reboot, albo natychmiast: sudo modprobe nouveau
 ```
 
-### `patches/kernel/` — MacBook Pro 11,3 kernel series (0002-0014)
+### `patches/kernel/` — MacBook Pro 11,3 kernel series (0002-0015)
 
 Kernel patch series for the dual-GPU MacBook Pro 15" Late 2013 (Intel iGPU +
 NVIDIA GT 750M on a `gmux` mux). Applied in order by `build-kernel.sh` to a
-Linux v7.1.8 tree (`0001` from `patches/` first, then `0002`-`0014`):
+Linux v7.1.8 tree (`0001` from `patches/` first, then `0002`-`0015`):
 
 | patch | area | fix |
 |---|---|---|
@@ -740,6 +740,7 @@ Linux v7.1.8 tree (`0001` from `patches/` first, then `0002`-`0014`):
 | `0012` | nouveau | PMU reply timeout (`gt215_pmu_send`) |
 | `0013` | nouveau | pstate calc timeout (`nvkm_pstate_calc`) |
 | `0014` | nouveau | IRQ_HANDLED for the private MSI line (fix `Disabling IRQ #91`) |
+| `0015` | applesmc | kbd backlight without `nand-disk` LED trigger (no blink on flash reads) |
 
 `0011`-`0013` fix a real hang: after a power-on (gmux power-cut → D3hot→D0),
 `pci_power_up` reads PMCSR before the PCIe link has trained, gets
@@ -757,6 +758,14 @@ the kernel's spurious-interrupt detector disables the line ("irq 91: nobody
 cared ... Disabling IRQ #91") after 100k IRQ_NONE — the dGPU is then unusable
 until reboot. The source block still runs above as protection; the line is
 only claimed as handled so the detector stays out of it.
+
+`0015` drops the `nand-disk` LED trigger from the keyboard backlight
+(`applesmc.c`). The `smc::kbd_backlight` LED was wired to the MTD activity
+trigger, so any SPI NOR flash read (NVRAM scan by reclockd, `nvram-test.sh`,
+`gmux-io`, udev/firmware) fired a oneshot blink that left the LED at 0 —
+the keyboard backlight physically turned off (SMC `LKSB=0`) and only came back
+when systemd-logind restored it on session activation. `default_trigger = NULL`
+is a class-level fix: the kbd LED is back under plain brightness control.
 
 ---
 

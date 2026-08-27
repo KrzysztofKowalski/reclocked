@@ -301,7 +301,7 @@ reclocked/
 │   ├── 81-nouveau-kepler.rules           reguła udev: wymuś nouveau (omija blacklist nvidia-utils)
 │   ├── reclockd.conf-caps.diff           diff reclockd.conf — [caps] Discord 0a/0e busy-gated
 │   ├── reclockd.conf-compiler.diff       diff reclockd.conf — [compiler] boost wiatraków
-│   └── kernel/                           seria kernelowa MacBook Pro 11,3 0002-0014
+│   └── kernel/                           seria kernelowa MacBook Pro 11,3 0002-0015
 ├── install-udev-rule.sh            instaluje powyższą regułę udev
 ├── pstate.sh                       inspekcja/wymuszanie pstate przez debugfs (+ iGPU RPS / coretemp)
 ├── build-mesa.sh                   budowanie patchowanego Mesa (tylko nouveau)
@@ -736,11 +736,11 @@ sudo udevadm control --reload-rules
 # reboot, albo natychmiast: sudo modprobe nouveau
 ```
 
-### `patches/kernel/` — seria kernelowa MacBook Pro 11,3 (0002-0014)
+### `patches/kernel/` — seria kernelowa MacBook Pro 11,3 (0002-0015)
 
 Seria patchy kernelowych dla dual-GPU MacBooka Pro 15" Late 2013 (iGPU Intel +
 NVIDIA GT 750M na muxie `gmux`). Nakładana w kolejności przez `build-kernel.sh`
-na drzewo jądra Linux v7.1.8 (`0001` z `patches/` najpierw, potem `0002`-`0014`):
+na drzewo jądra Linux v7.1.8 (`0001` z `patches/` najpierw, potem `0002`-`0015`):
 
 | patch | obszar | fix |
 |---|---|---|
@@ -757,6 +757,7 @@ na drzewo jądra Linux v7.1.8 (`0001` z `patches/` najpierw, potem `0002`-`0014`
 | `0012` | nouveau | timeout reply PMU (`gt215_pmu_send`) |
 | `0013` | nouveau | timeout pstate calc (`nvkm_pstate_calc`) |
 | `0014` | nouveau | IRQ_HANDLED dla prywatnej linii MSI (fix `Disabling IRQ #91`) |
+| `0015` | applesmc | kbd backlight bez triggara `nand-disk` (brak mignięcia przy odczycie flasha) |
 
 `0011`-`0013` naprawiają realny hang: po power-on (gmux power-cut → D3hot→D0)
 `pci_power_up` czyta PMCSR zanim link PCIe się wytrenuje, dostaje `0xFFFFFFFF`
@@ -773,6 +774,14 @@ detektor spurious-interrupt wyłącza linię („irq 91: nobody cared ...
 Disabling IRQ #91") po 100k IRQ_NONE — dGPU bezużyteczny do reboota. Blokada
 źródeł i tak wykonała się wcześniej i zostaje; linia jest tylko zgłaszana jako
 obsłużona, żeby detektor się nią nie zajmował.
+
+`0015` zdejmuje trigger `nand-disk` z podświetlenia klawiatury (`applesmc.c`).
+LED `smc::kbd_backlight` był podpięty pod trigger aktywności MTD, więc każdy
+odczyt SPI NOR flasha (skan NVRAM przez reclockd, `nvram-test.sh`, `gmux-io`,
+udev/firmware) odpalał oneshot blink, który zostawiał LED na 0 — podświetlenie
+klawiatury fizycznie gasło (SMC `LKSB=0`) i wracało dopiero gdy systemd-logind
+przywracał jasność przy aktywacji sesji. `default_trigger = NULL` to fix klasy
+problemu: LED kbd wraca pod zwykłą kontrolę brightness.
 
 ---
 
