@@ -1,0 +1,194 @@
+# /etc/reclockd.conf — reclockd daemon configuration v4.2 (Stage 3 policy + fan)
+# Copy: sudo cp reclockd.conf /etc/reclockd.conf
+#
+# List of "preferred" application classes (hyprctl activewindow/clients .class).
+# Preferred = app from this list FOCUSED OR (RUNNING + busy > busy-up) OR
+# (focused.title matches a pattern from [preferred-titles]).
+# Here: browsers (broad scope — any of them focused under load → 0e,
+# idle DOWNshifts). Discord/YouTube are tabs inside a browser — detected
+# by title in [preferred-titles], not by class (they have no window class of their own).
+
+[preferred]
+chromium
+firefox
+google-chrome
+brave
+
+# v4.1: "preferred" window titles (case-insensitive substring). Discord/YouTube
+# are tabs inside a browser (window class = the browser) — content is visible in the title.
+# Discord web: title contains "Discord". YouTube: "YouTube" / " - YouTube".
+# v4.4: applies ONLY to browser tabs (class chromium/firefox etc.) —
+# desktop Discord (Electron or Chrome PWA) is handled by [caps].
+[preferred-titles]
+Discord
+YouTube
+ - YouTube
+
+# v4.4: per-class policy. Key = window class; value = floor=…, max=…, busy-up=…
+#   floor    — resting state (IDLE never drops below it), hex pstate (e.g. 0a)
+#   max      — ceiling (never higher than this), hex pstate (e.g. 0e)
+#   busy-up  — custom UP-LOAD threshold (%), instead of the global busy-up (80)
+# A class with an entry = preferred (when focused) and does NOT catch title-priority.
+# Desktop Discord — two possible classes (unknown which one the user runs):
+#   - Electron:  "discord"
+#   - PWA Chrome: "chrome-discord.com__channels_@me-Default"
+# Policy: base 0a (idle holds 0a), busy > 50% → 0e, busy drops → back to 0a.
+# THERMAL is still paramount (may go below floor). A Discord tab inside a browser
+# (chromium/firefox etc.) is NOT in [caps] → force-0e by title stays unchanged.
+[caps]
+discord = floor=0a, max=0e, busy-up=50
+chrome-discord.com__channels_@me-Default = floor=0a, max=0e, busy-up=50
+
+# v4.1: "low-power" window classes (terminals). Focus of a window from this list → forces
+# the default profile (cap=07) with priority over preferred — even if Discord/
+# YouTube generates load in the background, a focused terminal holds 07 (power saving).
+[low-power]
+foot
+footclient
+Alacritty
+alacritty
+kitty
+Kitty
+ghostty
+Ghostty
+wezterm
+org.wezcel.Weasel
+
+[profile default]
+# Non-preferred app (terminal, editor): cap 07, hard throttle.
+# Thermal PER-PROFILE — conservative: above 65°C it slows down, recovery below 58°C.
+max-pstate = 07
+temp-down = 65
+temp-up = 58
+
+[profile preferred]
+# Preferred app (browsers): safe ladder 07↔0a↔0e (cap 0e).
+# v4.1: 0f DISABLED (boost-pstate = -1) — 0e and 0a are both stable, 0f has no visible
+# performance gain over 0e. When hot → ladder DOWN 0e→0a (THERMAL, one step).
+# Preferred thermal: above 82°C it slows down (ladder), recovery below 75°C.
+max-pstate = 0e
+temp-down = 82
+temp-up = 75
+boost-pstate = -1
+busy-boost = 85
+boost-dwell-ms = 5000
+
+# General parameters (override built-in defaults). Load hysteresis 80/40 (40 pp).
+[global]
+interval-ms = 200
+poll-ms = 1000
+busy-up = 80
+busy-down = 40
+temp-dwell-ms = 5000
+idle-dwell-ms = 5000
+profile-dwell-ms = 2000
+win-ms = 1000
+exit-state = 0a
+# v4.1: instantaneous busy threshold (‰) below which DOWN transitions are allowed
+# (GR-idle gate). 300 = 30%. In-flight memory reclock while GR is mid-render wedges
+# the engine — the gate defers DOWN until busy hits a valley. UP-LOAD/BOOST-UP not gated.
+gr-idle-promille = 300
+
+# v4.2: applesmc fan control (MacBook SMC). Temp→RPM curve:
+# linear interpolation between fanN_min (at temp-min) and fanN_max (at temp-max).
+# RPM ranges (fanN_min/max) are read dynamically from sysfs at startup — NOT
+# hardcoded (fan1≈2160-6156, fan2≈2000-5700 RPM on GT 750M). Updated every
+# poll-ms (1 s). temp ≤ temp-min → min RPM (quiet), temp ≥ temp-max → max RPM.
+# fan-override (/run/reclockd/fan-override, reclockctl fan-off) freezes auto.
+# restore_auto on exit → fanN_manual=0 (SMC takes over, fail-safe).
+# v5.1: temp-min-igd/temp-max-igd — separate curve when ONLY iGPU is active
+# (dGPU OFF; temp = CPU/coretemp, because nouveau hwmon disappears). Quieter: fans
+# reach max only at 91°C (instead of 67°C with dGPU ON). With dGPU ON →
+# temp-min/temp-max curve (40/67). Chosen by dGPU power state (sw.dgpu_off()).
+[fan]
+enable = true
+temp-min = 40
+temp-max = 67
+temp-min-igd = 41
+temp-max-igd = 91
+
+# v4.6: fan boost when a running compiler is detected. Scans /proc/*/comm
+# (fallback cmdline) every poll-ms (1 s) for: clang, clang++, gcc, g++, cc, c++,
+# cc1, cc1plus, make, cmake, ninja, cargo, rustc, meson, go, javac, ld, as,
+# sccache, ccache + version prefixes (gcc-*, g++-*, clang-*).
+#   enable   — 1/0 (default 1): enables the whole feature
+#   fan-max  — % of maximum RPM (default 100 = full fans; 50 = half range)
+#   names    — extra process names to detect (comma-separated; optional)
+# Boost works ONLY in auto-mode — fan-override (/run/reclockd/fan-override,
+# reclockctl fan-off) takes priority (manual control is never overwritten).
+# When the compiler disappears → back to the temp curve (normal path).
+[compiler]
+enable = true
+fan-max = 100
+# names = mycc, mybuild
+
+# v5.0: switchd module — dGPU power-state + render routing.
+# In DIS topology (dGPU drives the panel) the module runs in MONITOR mode — zero
+# power changes (dGPU power-off blocked by the scanout gate). The power executor
+# activates after the boot-time switch to IGD (gpu-power-prefs + reboot).
+#   enable            — 1/0 (default 1): module active
+#   tick-ms           — decision tick (default 1000, == poll-ms)
+#   dwell-in-ms       — entry dwell for soft promotion (busy-gated)
+#   dwell-out-ms      — exit dwell for demote
+#   min-residence-ms  — min time on dGPU after promotion (anti-flapping)
+#   cooldown-ms       — cooldown after demote before promoting again
+#   wait-ready-ms     — wait_off timeout after power-off
+#   min-switch-gap-ms — min gap between power toggles
+#   temp-gate         — °C: do not promote when dGPU is hotter
+#   busy-enter        — % busy for soft promotion
+#   busy-exit         — % busy for demote
+#   pstate-settle-ms  — do not write pstate after power-on (GPU clock settle after D3hot→D0;
+#                       the first clock change may wedge the nouveau workqueue)
+#   pstate-write-timeout-ms — pstate write timeout (kernel hang safety: the write runs in
+#                       a separate thread; after timeout the daemon stays alive and suspends pstate)
+[switch]
+enable = true
+tick-ms = 1000
+dwell-in-ms = 3000
+dwell-out-ms = 5000
+min-residence-ms = 20000
+cooldown-ms = 45000
+wait-ready-ms = 2000
+min-switch-gap-ms = 10000
+temp-gate = 82
+busy-enter = 80
+busy-exit = 40
+pstate-settle-ms = 10000
+pstate-write-timeout-ms = 2000
+
+# dGPU power backend.
+#   backend               — manual (echo ON/OFF to vgaswitcheroo) | runpm (power/control)
+#   autosuspend-ms        — autosuspend_delay_ms for runpm
+#   wait-idle-timeout-ms  — /proc fd scan before power-off (open /dev/dri)
+#   wait-ready-timeout-ms — nouveau reinit timeout after power-on (runtime_status=active)
+[dpower]
+backend = manual
+autosuspend-ms = 5000
+wait-idle-timeout-ms = 5000
+wait-ready-timeout-ms = 10000
+
+# Window classes that require the dGPU (hard promotion, no busy-gate)
+# v5.2: browsers — browser focus → dGPU ON (power + pstate 0a/0e
+# from the [preferred] profile). Demote when focus moves to [low-power]/[igpu].
+[dgpu-hard]
+game
+blender
+steam
+chromium
+firefox
+google-chrome
+brave
+
+# Window classes with soft promotion (busy-gated) — empty by default
+[dgpu-soft]
+
+# Window classes always on iGPU (demotion)
+[igpu]
+foot
+kitty
+alacritty
+
+# Processes that require the dGPU (/proc/*/comm scan) — CUDA, DRI_PRIME
+[dgpu-procs]
+cuda
+blender

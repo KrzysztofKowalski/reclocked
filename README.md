@@ -266,6 +266,9 @@ reclocked/
 ├── LICENSE                         MIT
 ├── README.md                       this file
 ├── .gitignore
+├── examples/
+│   ├── reclockd.conf.pl            default config — Polish comments
+│   └── reclockd.conf.en            default config — English comments
 ├── reclockd/
 │   ├── reclockd.cpp                daemon source (~3070 lines, C++17)
 │   ├── Makefile                    builds ./reclockd (no libdrm link)

@@ -283,6 +283,9 @@ reclocked/
 ├── README.md                       ten plik (EN)
 ├── CZYTAJMIE.md                    ten plik (PL)
 ├── .gitignore
+├── examples/
+│   ├── reclockd.conf.pl            domyślny config — komentarze PL
+│   └── reclockd.conf.en            domyślny config — komentarze EN
 ├── reclockd/
 │   ├── reclockd.cpp                źródło demona (~3070 linii, C++17)
 │   ├── Makefile                    buduje ./reclockd (bez linkowania libdrm)
