@@ -74,7 +74,7 @@
 //      DYNAMICZNIE z sysfs przy starcie (nie hardkodowane — "wg 2ch wartosci" min/
 //      max na wentylator). x = clamp((temp - temp_min) / (temp_max - temp_min), 0,1);
 //      rpm = fanN_min + round(x * (fanN_max - fanN_min)). Aktualizacja co poll_ms
-//      (1 s). Sekcja [fan]: enable/temp-min(40)/temp-max(67).
+//      (1 s). Sekcja [fan]: enable/temp-min(51)/temp-max(91).
 //   G. FAN OVERRIDE: flag-file `/run/reclockd/fan-override` zamraża auto wentyl.
 //      (użytkownik steruje ręcznie: cusfan.sh / fullfan.sh). reclockctl fan-off/on.
 //   H. FAIL-SAFE wentylatorów: restore_auto() przy wyjściu zdejmuje fanN_manual=0
@@ -148,7 +148,7 @@
 //      iGPU (dGPU OFF — w IGD hwmon nouveau znika, temp=CPU/coretemp). Sekcja
 //      [fan] zyskuje klucze temp-min-igd/temp-max-igd (domyślnie 41/91°C) —
 //      cichsza: wiatraki wchodzą na max dopiero przy 91°C zamiast 67°C. Gdy dGPU
-//      ON → krzywa standardowa temp-min/temp-max (40/67). Wybór krzywej wg
+//      ON → krzywa standardowa temp-min/temp-max (51/91). Wybór krzywej wg
 //      sw.dgpu_off() (stan power dGPU), niezależny od topologii.
 
 #include <algorithm>
@@ -318,8 +318,8 @@ struct Config {
     // (1 s). fanN_min/fanN_max czytane dynamicznie z sysfs przy starcie (nie
     // hardkodowane — każde HW ma inny zakres). Override flag-file zatrzymuje auto.
     bool fan_enable     = true;
-    int  fan_temp_min   = 40;     // °C → min RPM (najcicho)
-    int  fan_temp_max   = 67;     // °C → max RPM (najgłośniej)
+    int  fan_temp_min   = 51;     // °C → min RPM (najcicho)
+    int  fan_temp_max   = 91;     // °C → max RPM (najgłośniej)
     // v5.1: osobna krzywa gdy tylko iGPU (dGPU OFF) — cichsza. Gdy dGPU OFF hwmon
     // nouveau znika, temp = CPU (coretemp); CPU może się grzać wyżej zanim wiatraki
     // wejdą na max. Wybór w pętli: sw.dgpu_off() → krzywa igd, inaczej standardowa.
@@ -378,7 +378,7 @@ static std::string g_config_path; // --config lub DEFAULT_CONFIG
 // Wypełniane w fan block pętli głównej, czytane przez write_status() (pstate.sh,
 // pasek Omarchy). off|override|compiler|igd|dga; tmin/tmax = aktywny zakres.
 static std::string g_fan_curve = "off";
-static int  g_fan_tmin = 40, g_fan_tmax = 67;
+static int  g_fan_tmin = 51, g_fan_tmax = 91;
 static int  g_fan_rpm1 = 0, g_fan_rpm2 = 0;
 
 // ------------------------------------------------------------------ pomocnicze
@@ -664,9 +664,9 @@ static bool load_config(const std::string& path, Config& cfg)
     if (cfg.gr_idle_promille > 1000) cfg.gr_idle_promille = 1000;
     // v4.2: sanity fan — temp_max musi być > temp_min (inaczej krzywa zdegenerowana).
     if (cfg.fan_temp_max <= cfg.fan_temp_min) {
-        logf(0, "config: fan temp-max <= temp-min (%d <= %d) — koryguję na 40/67",
+        logf(0, "config: fan temp-max <= temp-min (%d <= %d) — koryguję na 51/91",
              cfg.fan_temp_max, cfg.fan_temp_min);
-        cfg.fan_temp_min = 40; cfg.fan_temp_max = 67;
+        cfg.fan_temp_min = 51; cfg.fan_temp_max = 91;
     }
     // v5.1: sanity krzywa igd (tylko-iGPU) — analogicznie, korekta na 41/91.
     if (cfg.fan_temp_max_igd <= cfg.fan_temp_min_igd) {

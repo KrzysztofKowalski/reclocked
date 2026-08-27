@@ -97,13 +97,13 @@ gr-idle-promille = 300
 # fan-override (/run/reclockd/fan-override, reclockctl fan-off) zamraża auto.
 # restore_auto przy wyjściu → fanN_manual=0 (SMC przejmuje, fail-safe).
 # v5.1: temp-min-igd/temp-max-igd — osobna krzywa gdy włączone TYLKO iGPU
-# (dGPU OFF; temp = CPU/coretemp, bo hwmon nouveau znika). Cichsza: wiatraki
-# wchodzą na max dopiero przy 91°C (zamiast 67°C przy dGPU ON). Gdy dGPU ON →
-# krzywa temp-min/temp-max (40/67). Wybór wg stanu power dGPU (sw.dgpu_off()).
+# (dGPU OFF; temp = CPU/coretemp, bo hwmon nouveau znika). Gdy dGPU ON →
+# krzywa temp-min/temp-max (51/91); obie krzywe wchodzą na max przy 91°C.
+# Cichsze: start wiatraków przy 51°C (dga) / 41°C (igd). Wybór wg sw.dgpu_off().
 [fan]
 enable = true
-temp-min = 40
-temp-max = 67
+temp-min = 51
+temp-max = 91
 temp-min-igd = 41
 temp-max-igd = 91
 

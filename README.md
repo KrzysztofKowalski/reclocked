@@ -181,7 +181,7 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   separate, quieter curve applies: `temp-min-igd` / `temp-max-igd` (defaults
   41/91 °C) — fans hit max at 91 °C instead of 67 °C. The curve is chosen by
   the dGPU **power state** (`sw.dgpu_off()`), not the topology: OFF → iGPU
-  curve, ON → the standard 40/67 °C. `pstate.sh status` now also prints an
+  curve, ON → the standard 51/91 °C. `pstate.sh status` now also prints an
   `=== wentylatory ===` section — the active curve + range + RPMs from
   `/run/reclockd/status` (applesmc sysfs fallback when the daemon is down).
 - 🔀 **Browsers force the dGPU on (v5.2)**: browser classes (`chromium`,
@@ -197,7 +197,7 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
 - 🌀 **Fan control (applesmc)**: on Apple laptops, `reclockd` also drives the
   SMC fans via `/sys/devices/platform/applesmc.768/`. A linear temp→RPM curve
   is interpolated between `fanN_min` and `fanN_max`, which are **read
-  dynamically from sysfs at startup** (not hardcoded). Default band 40-67 °C,
+  dynamically from sysfs at startup** (not hardcoded). Default band 51-91 °C,
   updated every poll cycle, independent of pstate. `reclockctl fan-off`
   freezes auto (drive fans manually); `fan-on` resumes. Fail-safe restores SMC
   auto (`manual=0`) on exit.
@@ -516,8 +516,8 @@ preferred app is busy in the background.
 | Key | Default | Meaning |
 |---|---|---|
 | `enable` | `true` | Enable applesmc fan control. |
-| `temp-min` | `40` | °C at/below which fans sit at `fanN_min`. |
-| `temp-max` | `67` | °C at/above which fans sit at `fanN_max`. |
+| `temp-min` | `51` | °C at/below which fans sit at `fanN_min`. |
+| `temp-max` | `91` | °C at/above which fans sit at `fanN_max`. |
 | `temp-min-igd` | `41` | °C (iGPU-only, dGPU OFF) at/below which fans sit at `fanN_min`. |
 | `temp-max-igd` | `91` | °C (iGPU-only, dGPU OFF) at/above which fans sit at `fanN_max`. |
 
@@ -527,7 +527,7 @@ dynamically from sysfs at startup. Disabled silently if applesmc is absent.
 When the dGPU is OFF (switchd, IGD topology) the nouveau hwmon disappears and
 the fan temperature becomes the CPU (`coretemp`) — which can safely run hotter
 than the dGPU, hence the separate quieter iGPU curve (defaults 41/91 °C, v5.1).
-With the dGPU ON the standard `temp-min`/`temp-max` (40/67 °C) curve applies.
+With the dGPU ON the standard `temp-min`/`temp-max` (51/91 °C) curve applies.
 The curve is chosen by the dGPU **power state** (`sw.dgpu_off()`), not the
 topology.
 

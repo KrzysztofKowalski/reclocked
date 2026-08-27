@@ -190,7 +190,7 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
   wtedy osobna, cichsza krzywa: `temp-min-igd` / `temp-max-igd` (domyślnie
   41/91 °C) — wiatraki lecą na max dopiero przy 91 °C zamiast 67 °C. Wybór
   krzywej wg **stanu power** dGPU (`sw.dgpu_off()`), nie topologii: OFF →
-  krzywa igd, ON → standardowa 40/67 °C. `pstate.sh status` ma dodatkową
+  krzywa igd, ON → standardowa 51/91 °C. `pstate.sh status` ma dodatkową
   sekcję `=== wentylatory ===` — aktywna krzywa + zakres + obroty z
   `/run/reclockd/status` (fallback do sysfs applesmc, gdy daemon nie działa).
 - 🔀 **Przeglądarki wymuszają dGPU (v5.2)**: klasy przeglądarek (`chromium`,
@@ -208,7 +208,7 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
   steruje też wentylatorami SMC przez `/sys/devices/platform/applesmc.768/`.
   Krzywa temp→RPM jest interpolowana liniowo między `fanN_min` i `fanN_max`,
   które są **czytane dynamicznie z sysfs przy starcie** (nie hardkodowane).
-  Domyślny pas 40-67 °C, aktualizacja co cykl poll, niezależnie od pstate.
+  Domyślny pas 51-91 °C, aktualizacja co cykl poll, niezależnie od pstate.
   `reclockctl fan-off` zamraża auto (steruj wentylatorami ręcznie); `fan-on`
   wznawia. Fail-safe przywraca auto SMC (`manual=0`) przy wyjściu.
 - 🖥 **Synchronizacja vblank**: zapisy pstate są wyrównywane do vblank przez
@@ -532,8 +532,8 @@ apka preferred generuje obciążenie w tle.
 | Klucz | Domyślnie | Znaczenie |
 |---|---|---|
 | `enable` | `true` | Włącz kontrolę wentylatorów applesmc. |
-| `temp-min` | `40` | °C, przy/poniżej którego wentylatory siedzą na `fanN_min`. |
-| `temp-max` | `67` | °C, przy/powyżej którego wentylatory siedzą na `fanN_max`. |
+| `temp-min` | `51` | °C, przy/poniżej którego wentylatory siedzą na `fanN_min`. |
+| `temp-max` | `91` | °C, przy/powyżej którego wentylatory siedzą na `fanN_max`. |
 | `temp-min-igd` | `41` | °C (tylko-iGPU, dGPU OFF), przy/poniżej którego wentylatory siedzą na `fanN_min`. |
 | `temp-max-igd` | `91` | °C (tylko-iGPU, dGPU OFF), przy/powyżej którego wentylatory siedzą na `fanN_max`. |
 
@@ -543,7 +543,7 @@ dynamicznie z sysfs przy starcie. Wyłączane cicho, gdy applesmc nie istnieje.
 Gdy dGPU jest OFF (switchd, topologia IGD), hwmon nouveau znika i temp dla
 wentylatorów = CPU (`coretemp`) — CPU może się grzać bezpiecznie wyżej niż
 dGPU, stąd osobna, cichsza krzywa igd (domyślnie 41/91 °C, v5.1). Przy dGPU
-ON działa standardowa krzywa `temp-min`/`temp-max` (40/67 °C). Wybór krzywej
+ON działa standardowa krzywa `temp-min`/`temp-max` (51/91 °C). Wybór krzywej
 wg **stanu power** dGPU (`sw.dgpu_off()`), nie topologii.
 
 ### `[profile default]` — aplikacje nie-preferred (terminal/edytor)
