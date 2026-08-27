@@ -1,4 +1,4 @@
-# reclockd v4.3 — auto-reclocking GT 750M pod nouveau (systemd unit, NIE zainstalowany)
+# reclockd v5.0 — auto-reclocking GT 750M pod nouveau (systemd unit, NIE zainstalowany)
 # Instalacja (po decyzji usera):
 #   sudo cp reclockd.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
@@ -11,7 +11,7 @@
 # Config: /etc/reclockd.conf (patrz --config flag). Override: /run/reclockd/override.
 
 [Unit]
-Description=GPU auto-reclock daemon v4.3 (GT 750M / nouveau, app-aware + fan)
+Description=GPU auto-reclock daemon v5.0 (GT 750M / nouveau, app-aware + fan + switchd)
 After=graphical.target
 
 [Service]

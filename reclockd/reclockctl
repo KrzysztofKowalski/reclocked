@@ -1,17 +1,93 @@
 #!/usr/bin/env bash
 # reclockctl — wrapper kontroli daemona reclockd (systemd)
-# Użycie: reclockctl {start|stop|status|restart|reload|logs|fan-on|fan-off}
-#   start   — systemctl start reclockd
-#   stop    — systemctl stop reclockd (SIGTERM → restore exit-state + fan auto)
-#   status  — systemctl status reclockd + pstate.sh status + wentylatory
-#   restart — systemctl restart reclockd
-#   reload  — systemctl kill -s HUP reclockd (re-read configu bez restartu)
-#   logs    — journalctl -u reclockd -f
-#   fan-on  — usuń flag-file fan-override (daemon przejmuje auto wentylatorów)
-#   fan-off — utwórz flag-file fan-override (zamroź auto; steruj ręcznie przez sysfs)
+# Użycie: reclockctl {start|stop|status|restart|reload|logs|fan-on|fan-off|switch-status|dgpu-on|dgpu-off|dgpu-auto|to-igd|to-dis}
+#   start        — systemctl start reclockd
+#   stop         — systemctl stop reclockd (SIGTERM → restore exit-state + fan auto)
+#   status       — systemctl status reclockd + pstate.sh status + wentylatory
+#   restart      — systemctl restart reclockd
+#   reload       — systemctl kill -s HUP reclockd (re-read configu bez restartu)
+#   logs         — journalctl -u reclockd -f
+#   fan-on       — usuń flag-file fan-override (daemon przejmuje auto wentylatorów)
+#   fan-off      — utwórz flag-file fan-override (zamroź auto; steruj ręcznie fanN_manual/fanN_output)
+#   switch-status — status switchd (v5.0): topologia, power dGPU, target, nvram_prefs
+#   dgpu-on/off  — ręczny override power dGPU (flag-file dgpu-override; wzorzec fan-override)
+#   dgpu-auto    — zdejmij dgpu-override (daemon wraca do auto)
+#   to-igd/to-dis — ZAPIS NVRAM gpu-power-prefs (commit na następny boot) + reboot
 
 set -e
 CMD="${1:-status}"
+
+# ---------- helper: wyciągnij wartość pola z pliku JSON (bez jq) ----------
+# /run/reclockd/status (daemon v5.0) to JSON — prosty ekstraktor stringów i
+# liczb (wzorzec json_str z reclockd.cpp; bez zależności od jq).
+json_get() { # <plik> <klucz>
+  local f="$1" k="$2" line v
+  line="$(tr -d '\n' < "$f" 2>/dev/null)"
+  v="$(printf '%s' "$line" | grep -o "\"$k\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -n1 | sed -E 's/.*:[[:space:]]*"([^"]*)".*/\1/')"
+  if [ -z "$v" ]; then
+    v="$(printf '%s' "$line" | grep -o "\"$k\"[[:space:]]*:[[:space:]]*[0-9-]*" | head -n1 | sed -E 's/.*:[[:space:]]*//')"
+  fi
+  printf '%s' "$v"
+}
+
+# ---------- NVRAM gpu-power-prefs: zapis (to-igd / to-dis) ----------
+# Zapis = SetVariable runtime service — działa nawet gdy zmienna ukryta przed
+# enumeracją (raport 70 §2.4). NVRAM = commit na następny boot, NIE live.
+# ZAKAZ: NVRAM nigdy nie pisany przy live power-toggle (dgpu-on/dgpu-off).
+EFIVARS=/sys/firmware/efi/efivars
+GPREFS_FILE="gpu-power-prefs-fa4ce28d-b62f-4c99-9cc3-6815686e30f9"
+
+nvram_write() { # <data-hex> <opis>  — data-hex: "01 00 00 00" (IGD) / "00 00 00 00" (DIS)
+  local data="$1" desc="$2"
+  local target="$EFIVARS/$GPREFS_FILE"
+  local attrs fmt ok=0 readback
+  if [ ! -d /sys/firmware/efi ]; then
+    echo "BŁĄD: brak /sys/firmware/efi — nie jesteś w trybie EFI" >&2
+    exit 1
+  fi
+  if ! mount | grep -q "$EFIVARS"; then
+    sudo -n mount -t efivarfs efivarfs "$EFIVARS" 2>/dev/null \
+      || { echo "BŁĄD: nie udało się zamontować $EFIVARS" >&2; exit 1; }
+  fi
+  echo "Zapis gpu-power-prefs = $desc (commit na następny boot, NIE live)"
+  # atrybuty 07 00 00 00 (NV|BS|RT); fallback 07 00 00 80 (+ENHANCED_AUTH)
+  for attrs in "07 00 00 00" "07 00 00 80"; do
+    # printf "\x07\x00\x00\x00\x01\x00\x00\x00" — attrs + dane (raport 70 §2.2)
+    fmt="\\x${attrs// /\\x}\\x${data// /\\x}"
+    sudo -n chattr -i "$target" 2>/dev/null || true
+    if printf "$fmt" | sudo -n tee "$target" >/dev/null 2>&1; then
+      ok=1
+      echo "zapis OK (atrybuty $attrs)"
+      break
+    fi
+  done
+  [ "$ok" = 1 ] || { echo "BŁĄD: zapis odrzucony (EFI_ACCESS_DENIED / attr mismatch?)" >&2; exit 1; }
+  # weryfikacja przez ponowny odczyt; gdy efivarfs nie pokazuje → po reboocie
+  if [ -r "$target" ]; then
+    readback="$(dd if="$target" bs=1 skip=4 count=4 2>/dev/null | xxd -p)"
+    if [ "$readback" = "${data// /}" ]; then
+      echo "weryfikacja OK: odczytano $readback"
+    else
+      echo "UWAGA: odczytano $readback zamiast ${data// /} — weryfikacja po reboocie"
+    fi
+  else
+    echo "zapis OK, weryfikacja po reboocie (efivarfs nie pokazuje zmiennej)"
+  fi
+}
+
+nvram_reboot() { # <opis>
+  local desc="$1" ans
+  read -r -p "Zrestartować teraz, aby przełączyć GPU na $desc? [t/N] " ans
+  case "$ans" in
+    t|T|tak|Tak|TAK|y|Y|yes|Yes|YES)
+      echo "Restart..."
+      sudo -n reboot
+      ;;
+    *)
+      echo "Bez restartu — zmiana wejdzie w życie po ręcznym reboocie."
+      ;;
+  esac
+}
 
 case "$CMD" in
   start)
@@ -38,6 +114,23 @@ case "$CMD" in
     done
     [ -f /run/reclockd/fan-override ] && echo "fan-override: AKTYWNY (auto zamrożone)" || echo "fan-override: brak (auto)"
     ;;
+  switch-status)
+    f="/run/reclockd/status"
+    if [ ! -f "$f" ]; then
+      echo "brak $f — daemon v5.0 (switchd) nieaktywny?" >&2
+      exit 1
+    fi
+    echo "--- switchd (v5.0) ---"
+    printf "topologia:       %s\n" "$(json_get "$f" topology)"
+    printf "power dGPU:      %s\n" "$(json_get "$f" dgpu_power)"
+    printf "target:          %s\n" "$(json_get "$f" target)"
+    printf "ostatnia akcja:  %s\n" "$(json_get "$f" last_action)"
+    printf "nvram_prefs:     %s\n" "$(json_get "$f" nvram_prefs)"
+    err="$(json_get "$f" last_error)"
+    if [ -n "$err" ]; then
+      printf "ostatni błąd:    %s\n" "$err"
+    fi
+    ;;
   restart)
     sudo -n systemctl restart reclockd
     echo "reclockd zrestartowany"
@@ -55,25 +148,53 @@ case "$CMD" in
     sudo -n rm -f /run/reclockd/fan-override
     echo "fan-override ZDJĘTY — daemon przejmuje auto wentylatorów"
     ;;
+  dgpu-on)
+    sudo -n mkdir -p /run/reclockd
+    printf 'on\n' | sudo -n tee /run/reclockd/dgpu-override >/dev/null
+    echo "dgpu-override: ON — dGPU wymuszony włączony (daemon trzyma power ON)"
+    ;;
+  dgpu-off)
+    sudo -n mkdir -p /run/reclockd
+    printf 'off\n' | sudo -n tee /run/reclockd/dgpu-override >/dev/null
+    echo "dgpu-override: OFF — dGPU wymuszony wyłączony (daemon trzyma power OFF)"
+    ;;
+  dgpu-auto)
+    sudo -n rm -f /run/reclockd/dgpu-override
+    echo "dgpu-override ZDJĘTY — daemon wraca do auto (polityka switchd)"
+    ;;
+  to-igd)
+    nvram_write "01 00 00 00" "IGD (iGPU)"
+    nvram_reboot "IGD (iGPU)"
+    ;;
+  to-dis)
+    nvram_write "00 00 00 00" "DIS (dGPU)"
+    nvram_reboot "DIS (dGPU)"
+    ;;
   logs)
     sudo -n journalctl -u reclockd -f --no-pager
     ;;
   -h|--help|help)
     cat <<'EOF'
-reclockctl {start|stop|status|restart|reload|logs|fan-on|fan-off}
-  start   — uruchom daemon
-  stop    — zatrzymaj (restore exit-state + fan auto)
-  status  — status systemd + pstate + wentylatory
-  restart — restart
-  reload  — SIGHUP (re-read configu bez restartu)
-  logs    — journalctl -f
-  fan-on  — zdejmij fan-override (daemon auto wentylatorów)
-  fan-off — fan-override (zamroź auto; steruj ręcznie)
+reclockctl {start|stop|status|restart|reload|logs|fan-on|fan-off|switch-status|dgpu-on|dgpu-off|dgpu-auto|to-igd|to-dis}
+  start        — uruchom daemon
+  stop         — zatrzymaj (restore exit-state + fan auto)
+  status       — status systemd + pstate + wentylatory
+  restart      — restart
+  reload       — SIGHUP (re-read configu bez restartu)
+  logs         — journalctl -f
+  fan-on       — zdejmij fan-override (daemon auto wentylatorów)
+  fan-off      — fan-override (zamroź auto; steruj ręcznie)
+  switch-status — status switchd (v5.0): topologia, power dGPU, target, nvram_prefs
+  dgpu-on      — override: wymuś dGPU ON (flag-file dgpu-override)
+  dgpu-off     — override: wymuś dGPU OFF (flag-file dgpu-override)
+  dgpu-auto    — zdejmij dgpu-override (daemon wraca do auto)
+  to-igd       — NVRAM gpu-power-prefs=IGD + reboot (user-confirmed)
+  to-dis       — NVRAM gpu-power-prefs=DIS + reboot (user-confirmed)
 EOF
     ;;
   *)
     echo "Nieznana komenda: $CMD" >&2
-    echo "Użycie: reclockctl {start|stop|status|restart|reload|logs|fan-on|fan-off}" >&2
+    echo "Użycie: reclockctl {start|stop|status|restart|reload|logs|fan-on|fan-off|switch-status|dgpu-on|dgpu-off|dgpu-auto|to-igd|to-dis}" >&2
     exit 1
     ;;
 esac
