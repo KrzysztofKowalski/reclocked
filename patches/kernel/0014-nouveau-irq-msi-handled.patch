@@ -1,0 +1,45 @@
+From 0014-nouveau-irq-msi-handled Mon Sep 17 00:00:00 2001
+From: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+Date: Tue, 26 Aug 2026 00:00:00 +0200
+Subject: [PATCH 0014/0014] core/intr: IRQ_HANDLED for private MSI line (fix 'Disabling IRQ')
+
+On the MacBookPro11,3 the nonstall fence notify is routed to the separate
+NRHOST interrupt line (PMC INTR_NRHOST 0x000104, leaf 1), which has no
+registered handler: gk104_mc_intrs[] only lists leaf-0 masks, so a flood
+of nonstall notifications (e.g. glmark2 --frame-end none at ~8000 FPS,
+7.3M MSI interrupts) makes nvkm_intr() return IRQ_NONE and the kernel's
+spurious-interrupt detector disables the IRQ after 100k IRQ_NONE
+("irq 91: nobody cared ... Disabling IRQ #91"), leaving the dGPU
+unusable until reboot (raport 78).
+
+This is a driver bug, not our 0011-0013 patches: the nonstall path is
+consumed via the fifo nonstall event (0x002140), not through a nvkm_inth,
+so IRQ_NONE was the intended upstream return for it (Skeggs 2023 treated
+it as normal and only added debug-level logging).  The source block
+(nvkm_intr_block_locked, INTR_MASK_NRHOST 0x000644) still runs above and
+remains as protection; claim the private MSI line as handled so the
+spurious-interrupt detector stays out of it.
+
+Signed-off-by: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
+---
+ drivers/gpu/drm/nouveau/nvkm/core/intr.c |    9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+--- a/drivers/gpu/drm/nouveau/nvkm/core/intr.c	2026-08-27 22:15:11.798701344 +0200
++++ b/drivers/gpu/drm/nouveau/nvkm/core/intr.c	2026-08-27 22:15:27.279134475 +0200
+@@ -225,6 +225,15 @@
+ 	nvkm_intr_rearm_locked(device);
+ done_unlock:
+ 	spin_unlock(&device->intr.lock);
++	/* Prywatna linia MSI (nonstall fence notify na leaf 1) nie ma
++	 * rejestrowanego handlera — IRQ_NONE karmi spurious-detector
++	 * (po ~100k wyłącza IRQ, "Disabling IRQ").  Blokada źródeł
++	 * (nvkm_intr_block_locked, INTR_MASK_NRHOST 0x000644) wykonała
++	 * się już wcześniej i zostaje — tu tylko uznajemy przerwanie
++	 * za obsłużone.
++	 */
++	if (ret == IRQ_NONE && device->pci && device->pci->msi)
++		ret = IRQ_HANDLED;
+ 	return ret;
+ }
+ 
