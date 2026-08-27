@@ -190,6 +190,18 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   `0a/0e`); focus moving to a terminal demotes back (`[igpu]`/`[low-power]`).
   Config-only — the daemon picks it up live via `reclockctl reload` (SIGHUP),
   no rebuild.
+- 🎛 **`[dgpu-active]` — 3-step pstate policy for the whole dGPU (v5.4)**: when
+  enabled, the profile ladder is replaced by a unified state machine that
+  applies to **every** app running on the dGPU: `0a` baseline ("efficient power
+  save"), `07` deep idle (no user input for `activity-dwell-ms` **and** busy
+  below `deep-idle-busy`), `0e` heavy (busy > `busy-enter` sustained **and**
+  temp < `temp-up`). A video **title no longer forces `0e`** — `0e` is
+  exclusively busy-driven. User activity is detected via **evdev**
+  (`/dev/input/event*`, separate thread — scroll + keyboard + mouse);
+  `[caps]` floor stays a hard minimum (`max(cap_floor, dynamic_floor)`),
+  `[low-power]` focus clamps the ceiling to `low-power-ceiling`, thermals stay
+  per-profile. Status gains `dgpu_state` / `input_active` / `video`. Disable
+  with `enable = false` (old profile/ladder logic returns).
 - 🌡 **Per-profile thermal guard**: thermal downclock is **per-profile**, not
   global. `default` throttles at 65°C / recovers below 58°C; `preferred`
   throttles at 82°C / recovers below 75°C. Thermal down is prioritized over
@@ -365,11 +377,25 @@ focused, or when running + busy > `busy-up`. Example: browsers.
 
 ### `[preferred-titles]` section
 
-Window **titles** (case-insensitive substring match) that trigger the
-`preferred` profile with **title-priority** — forcing `0e` overriding the
-`busy > busy-up` rule. Use this for browser tabs that have no window class of
-their own (Discord, YouTube). On match, IDLE downshift is also suppressed so
-the app holds `0e`. Example: `Discord`, `YouTube`, ` - YouTube`.
+Window **titles** (case-insensitive substring match) that qualify the focused
+window as `preferred` (profile selection) and, with `[dgpu-active]` disabled,
+carry the legacy **title-priority** — forcing `0e` overriding the
+`busy > busy-up` rule (and suppressing IDLE downshift). Use this for browser
+tabs that have no window class of their own (Discord, YouTube). Example:
+`Discord`, `YouTube`, ` - YouTube`.
+
+**With `[dgpu-active]` enabled (v5.4)** the title is **informational only**
+(status/log `video: ...`) — it **no longer forces `0e`**. `0e` is entered
+exclusively via busy > `busy-enter` (80%) sustained plus temp < `temp-up`.
+A playing YouTube tab (busy 25-36 %) stays at the `0a` baseline.
+
+### `[video-classes]` section — player classes (v5.4)
+
+Window classes of players whose title does not contain a known service name
+(`mpv`, `vlc` put a file path in the title). They qualify as "video"
+**informationally** (status/log `video: ...`). As with `[preferred-titles]`,
+the title/class never decides the pstate — `0e` is exclusively busy-driven.
+Empty by default.
 
 ### `[caps]` section — per-class policy
 
@@ -384,17 +410,19 @@ class (Electron, Chrome PWA). Syntax: `class = floor=0a, max=0e, busy-up=50`
 | `busy-up` | `0` (global 80) | Own UP-LOAD threshold (%). `0` = the global `busy-up`. |
 
 A class with a `[caps]` entry behaves like `[preferred]` **while focused**, but
-is **not** matched by `[preferred-titles]` — no force-`0e` on title match. Use
-it for Desktop Discord — both possible classes (Electron `discord`, PWA
-`chrome-discord.com__channels_@me-Default`) get the same policy: base `0a`,
-busy > 50 % → `0e`, idle → back `0a`. TERMAL stays top priority (may go below
-`floor`). A Discord **tab** in a browser has no `[caps]` entry and keeps the
-force-`0e` title path unchanged.
+is **not** matched by `[preferred-titles]` — no force-`0e` on title match.
+TERMAL stays top priority (may go below `floor`).
+
+**v5.4:** desktop Discord was **removed** from the default `[caps]` entries
+(user decision 2026-08-28) — with `[dgpu-active]` enabled, Discord is treated
+like any other class on the dGPU and gets the full eco (`0a` baseline / `07`
+deep idle / `0e` only at real busy > 80 %). The section stays for classes that
+want a **hard** floor (e.g. `floor=0a` = never `07`).
 
 ```ini
 [caps]
-discord = floor=0a, max=0e, busy-up=50
-chrome-discord.com__channels_@me-Default = floor=0a, max=0e, busy-up=50
+# discord = floor=0a, max=0e, busy-up=50
+# chrome-discord.com__channels_@me-Default = floor=0a, max=0e, busy-up=50
 ```
 
 ### 🛡 Suspend/resume self-healing (v4.5)
@@ -566,6 +594,45 @@ topology.
 | `vblank-sync` | `true` | Align pstate writes to vblank. |
 | `gr-idle-promille` | `300` | ‰ instantaneous busy below which DOWN transitions are allowed (GR-idle gate). 300 = 30 %. `0` paralyzes DOWN; `1000` disables the gate. |
 
+### `[dgpu-active]` section — 3-step policy for the whole dGPU (v5.4)
+
+Unified three-step state machine that applies to **every** app on the dGPU when
+it is ON: `0a` baseline ("efficient power save") / `07` deep idle / `0e` heavy.
+Replaces profile-based state selection (`max-pstate` is ignored); profiles still
+supply the per-profile thermal thresholds.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enable` | `false` | 1/0 — turn the unified policy on (else the old profile/ladder logic). |
+| `baseline` | `0a` | Resting pstate of a working dGPU ("efficient power save"). |
+| `max` | `0e` | Ceiling for sustained load — the only path to `0e`. |
+| `low-power-ceiling` | `0a` | Ceiling when the focused window is in `[low-power]` (background never gets `0e`). |
+| `activity-source` | `evdev` | `evdev` (input via `/dev/input/event*`, separate thread) or `none`/`cursorpos` (no input signal — idle after dwell, wake only via busy/title). |
+| `activity-dwell-ms` | `8000` | No input for this long **and** busy < `deep-idle-busy` → floor drops to `07`. |
+| `deep-idle-busy` | `20` | Busy% below which the dGPU may enter deep idle (`07`). YouTube (~25-36 %) holds `0a`; 480p (busy < 20 %) may drop to `07`. |
+| `busy-enter` | `80` | Busy% sustained above → `0e` (with temp < `temp-up`). |
+| `busy-exit` | `40` | Busy% at/below → IDLE downshift counter (hysteresis 80/40). |
+| `temp-per-profile` | `true` | `true` = thermal thresholds from the focused profile; `false` = the common `temp-down`/`temp-up` below. |
+| `temp-down` | `82` | °C common thermal down (only when `temp-per-profile=false`). |
+| `temp-up` | `75` | °C common thermal up / `0e` entry margin (only when `temp-per-profile=false`). |
+
+```ini
+[dgpu-active]
+enable = true
+baseline = 0a
+max = 0e
+low-power-ceiling = 0a
+activity-source = evdev
+activity-dwell-ms = 8000
+deep-idle-busy = 20
+busy-enter = 80
+busy-exit = 40
+temp-per-profile = true
+```
+
+`[video-classes]` — player window classes (`mpv`, `vlc`) qualified as "video"
+**informationally** (status/log). Empty by default.
+
 ### CLI flags
 
 ```
@@ -592,6 +659,25 @@ topology.
 
 ### 🎛 Transition logic (summary)
 
+**With `[dgpu-active] enable = true` (v5.4)** the following ladder is replaced
+by the unified 3-step state machine:
+
+```
+States:  DEEP_IDLE (07) / ACTIVE (baseline 0a) / HEAVY (0e).
+Ceiling: low-power-focus → low-power-ceiling;
+         busy > busy-enter ([caps] busy-up per-class) → max; else baseline.
+Floor:   activity (evdev input / title change / busy >= deep-idle-busy)
+         → baseline; else no input >= activity-dwell → 07 (deep idle).
+         [caps] floor = hard minimum: floor = max(cap_floor, dynamic_floor).
+WAKE  07→0a:  g_cur_idx < floor AND temp < temp_down (one sample — fast, ≤1 s).
+DOWN  0e→0a→07: TERMAL (temp > temp_down) / IDLE (g_cur_idx > floor, busy ≤
+         busy-exit) / CEILING (g_cur_idx > ceiling). DOWN is GR-idle gated.
+UP    0a→0e:  ONLY busy > busy-enter sustained (temp_dwell) AND temp < temp-up.
+Boost (0f) is disabled; a video title never forces 0e.
+```
+
+**With `[dgpu-active] disabled`** (default) the classic ladder applies:
+
 ```
 UP   07→0a→0e  (UP-LOAD):  g_cur_idx < ceiling AND temp < temp_up (temp_dwell)
                           AND (busy > busy_up OR title_pref). One step/decision.
@@ -613,8 +699,8 @@ BOOST-DOWN 0f→0e:         temp > temp_up OR temp >= temp_down (INSTANT, priori
                           OR busy < busy_up (load hysteresis).
 ```
 
-Priority hierarchy: **TERMAL > low-power terminal (→07) > title-match (→0e,
-suppress IDLE, override busy) > class / running-busy (busy-gated) > IDLE.**
+Priority hierarchy (classic): **TERMAL > low-power terminal (→07) > title-match
+(→0e, suppress IDLE, override busy) > class / running-busy (busy-gated) > IDLE.**
 
 ---
 

@@ -1,4 +1,4 @@
-# /etc/reclockd.conf — konfiguracja daemona reclockd v4.2 (polityka Etap 3 + fan)
+# /etc/reclockd.conf — konfiguracja daemona reclockd v5.4 (polityka [dgpu-active] + fan + switchd)
 # Kopiuj: sudo cp reclockd.conf /etc/reclockd.conf
 #
 # Lista class-ów aplikacji "preferred" (hyprctl activewindow/clients .class).
@@ -7,6 +7,8 @@
 # Tu: przeglądarki (szeroki scope — każda z focusem pod obciążeniem → 0e,
 # idle DOWNshiftuje). Discord/YouTube są kartami w przeglądarce — detekcja
 # po tytule w [preferred-titles], nie po klasie (nie mają własnej klasy okna).
+# Gdy [dgpu-active] enable=true: profile dostarczają TYLKO progów termalnych
+# (max-pstate ignorowane) — stan pstate wybiera maszyna stanów [dgpu-active].
 
 [preferred]
 chromium
@@ -19,25 +21,34 @@ brave
 # Discord web: tytuł zawiera "Discord". YouTube: "YouTube" / " - YouTube".
 # v4.4: dotyczy TYLKO kart w przeglądarce (klasa chromium/firefox itd.) —
 # desktop Discord (Electron lub PWA Chrome) jest obsługiwany przez [caps].
+# v5.4: przy [dgpu-active] tytuł jest INFORMACYJNY (status/log "video: ...") —
+# NIE wymusza 0e. 0e wchodzi wyłącznie przez busy > busy-enter (80%) + temp.
 [preferred-titles]
 Discord
 YouTube
  - YouTube
+
+# v5.4: klasy odtwarzaczy kwalifikujące "video" INFORMACYJNIE (status/log), gdy
+# tytuł nie zawiera znanego serwisu (mpv/vlc mają ścieżkę pliku w tytule).
+# Tytuł/klasa video NIE decyduje o stanie pstate (0e = wyłącznie busy-driven).
+[video-classes]
+# mpv
+# vlc
 
 # v4.4: per-klasowa polityka. Klucz = klasa okna; wartość = floor=…, max=…, busy-up=…
 #   floor    — stan spoczynkowy (IDLE nie spada poniżej), hex pstate (np. 0a)
 #   max      — ceiling (nie wyżej niż to), hex pstate (np. 0e)
 #   busy-up  — własny próg UP-LOAD (%), zamiast globalnego busy-up (80)
 # Klasa z wpisem = preferred (gdy focused) i NIE łapie title-priority.
-# Desktop Discord — dwie możliwe klasy (nie wiadomo której user używa):
-#   - Electron:  "discord"
-#   - PWA Chrome: "chrome-discord.com__channels_@me-Default"
-# Polityka: baza 0a (idle trzyma 0a), busy > 50% → 0e, busy spada → znowu 0a.
+# v5.4: desktop Discord ZOSTAŁ USUNIĘTY (decyzja usera 2026-08-28) — Discord
+# traktowany jak każda inna klasa na dGPU: dostaje pełny eco z [dgpu-active]
+# (0a baseline / 07 deep idle / 0e tylko przy realnym busy > 80%).
+# Sekcja zostaje dla klas, które chcą TWARDE floor (np. floor=0a = nigdy 07).
 # TERMAL nadal nadrzędny (może zejść poniżej floor). Karta Discord w przeglądarce
-# (chromium/firefox itd.) NIE jest w [caps] → force-0e po tytule bez zmian.
+# (chromium/firefox itd.) nie jest w [caps] → obsługiwana przez [dgpu-active].
 [caps]
-discord = floor=0a, max=0e, busy-up=50
-chrome-discord.com__channels_@me-Default = floor=0a, max=0e, busy-up=50
+# discord = floor=0a, max=0e, busy-up=50
+# chrome-discord.com__channels_@me-Default = floor=0a, max=0e, busy-up=50
 
 # v4.1: klasy okien "low-power" (terminale). Focus okna z tej listy → wymusza
 # profil default (cap=07) z priorytetem nad preferred — nawet jeśli Discord/
@@ -88,6 +99,39 @@ exit-state = 0a
 # (GR-idle gate). 300 = 30%. reclok pamięci w locie pod renderem GR wedge'uje
 # silnik — gate odracza DOWN aż busy dolinie. UP-LOAD/BOOST-UP nie gate'owane.
 gr-idle-promille = 300
+
+# v5.4: [dgpu-active] — TRÓJSTOPNIOWA polityka pstate dla CAŁEGO dGPU, gdy ON.
+# (raport 79 + decyzje usera 2026-08-28). Zastępuje wybór stanu przez profil:
+#   0a (baseline) — „efficient power save" — domyślny stan dGPU pracującego
+#   07 (deep idle) — dGPU ON, nic się nie renderuje, brak inputu przez dwell
+#   0e (heavy)     — WYŁĄCZNIE busy-driven: busy > busy-enter (80%) sustained
+#                    ORAZ temp < temp-up (margines termalny). Tytuł video NIE daje 0e.
+# Detekcja aktywności usera: evdev (/dev/input/event*, osobny wątek — scroll+
+# klawiatura+mysz). Bez evdev (activity-source != evdev lub brak urządzeń):
+# brak sygnału inputu — idle po dwell, wake tylko przez busy/zmianę tytułu.
+# enable = false → daemon działa jak dotychczas (profile/ladder, stara logika).
+[dgpu-active]
+enable = true
+baseline = 0a
+max = 0e
+# ceiling gdy focused ∈ [low-power] (terminal): tło nie dostaje 0e, ale
+# baseline 0a zostaje (oszczędność przy zachowaniu responsywności).
+low-power-ceiling = 0a
+activity-source = evdev
+# Brak inputu przez X i busy < deep-idle-busy → floor spada do 07 (deep idle).
+activity-dwell-ms = 8000
+# Busy % poniżej którego dGPU może wejść w deep idle (07). YouTube ~25-36% busy
+# → trzyma 0a; 480p (busy < 20%) → może zejść do 07.
+deep-idle-busy = 20
+# Wejście/zejście 0e dla loadu ogólnego (jedyna droga do 0e). busy-enter
+# nadpisuje globalny busy-up (80) w kontekście dGPU-active.
+busy-enter = 80
+busy-exit = 40
+# Termalne: true = per-profil (def 65/58, preferred 82/75 wg focusa); false =
+# wspólne temp-down/temp-up poniżej. Wejście 0e wymaga temp < temp-up.
+temp-per-profile = true
+# temp-down = 82
+# temp-up = 75
 
 # v4.2: sterowanie wentylatorami applesmc (SMC MacBooka). Krzywa temp→RPM:
 # liniowa interpolacja między fanN_min (przy temp-min) a fanN_max (przy temp-max).

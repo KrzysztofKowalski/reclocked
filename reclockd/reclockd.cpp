@@ -158,6 +158,20 @@
 //      → oneshot blink → LKSB=0; raport 80). /run to tmpfs — cache resetuje
 //      się przy reboot (poprawne: prefs zmienia się tylko przez firmware przy
 //      to-igd/to-dis + reboot).
+//
+// v5.4 (2026-08-28):
+//   R. [dgpu-active] — TRÓJSTOPNIOWA POLITYKA PSTATE dla CAŁEGO dGPU-ON:
+//      baseline (0a, „efficient power save") / deep idle (07) / heavy (0e).
+//      Detekcja aktywności usera przez evdev (/dev/input/event*, osobny wątek
+//      z poll(); scroll+klawiatura+mysz). 0e WYŁĄCZNIE busy-driven
+//      (busy > busy-enter 80% + temp < temp-up) — tytuł/klasa video
+//      ([preferred-titles]/[video-classes]) tylko INFORMACYJNY (status/log).
+//      07 = brak inputu przez activity-dwell-ms ORAZ busy < deep-idle-busy.
+//      [caps] floor = twarde minimum (max(cap_floor, floor_dynamic)),
+//      low-power ceiling (klasy [low-power]), termalne per-profil (lub wspólne
+//      przez temp-per-profile=false). title_pref (force-0e po tytule) ZNIKA.
+//      Sekcja [dgpu-active]; escape hatch enable=false → stara logika
+//      (profil/ladder) bez zmian. Status: dgpu_state / input_active / video.
 
 #include <algorithm>
 #include <atomic>
@@ -176,7 +190,11 @@
 #include <fcntl.h>
 #include <functional>
 #include <getopt.h>
+#include <glob.h>
+#include <linux/input.h>
 #include <map>
+#include <mutex>
+#include <poll.h>
 #include <set>
 #include <string>
 #include <sys/ioctl.h>
@@ -363,6 +381,28 @@ struct Config {
         std::set<std::string> igpu;       // [igpu] klasy — zawsze iGPU (democja)
         std::set<std::string> dgpu_procs; // [dgpu-procs] procesy — CUDA/DRI_PRIME
     } sw;
+    // v5.4: sekcja [dgpu-active] — trójstopniowa polityka pstate dla całego
+    // dGPU-ON (raport 79, decyzje usera 2026-08-28). enable=false (domyślnie) =
+    // escape hatch: daemon działa jak dotychczas (profile/ladder). enable=true →
+    // nowa logika. 0e WYŁĄCZNIE busy-driven (busy > busy-enter) + margines
+    // termalny — tytuł video NIE daje 0e (kwalifikator tylko informacyjny).
+    struct DgpuActiveCfg {
+        bool enable = false;            // escape hatch — domyślnie WYŁĄCZONE
+        int  baseline = 0x0a;           // stan spoczynkowy dGPU pracującego
+        int  max      = 0x0e;           // ceiling dla sustained load
+        int  low_power_ceiling = 0x0a;  // ceiling gdy focused ∈ [low-power]
+        std::string activity_source = "evdev";  // evdev | none | cursorpos (→ none)
+        int  activity_dwell_ms = 8000;  // brak inputu przez X → floor do 07
+        int  deep_idle_busy = 20;       // % busy < (i brak inputu) → deep idle 07
+        int  busy_enter = 80;           // % busy > sustained → 0e (jedyna droga do 0e)
+        int  busy_exit  = 40;           // % busy ≤ → IDLE downshift (histereza)
+        bool temp_per_profile = true;   // true = temp-down/up z profilu focusa
+        int  temp_down = 82;            // wspólne termalne (gdy temp-per-profile=false)
+        int  temp_up   = 75;
+        // [video-classes] — klasy odtwarzaczy (mpv/vlc) kwalifikujące video
+        // (informacyjnie — status/log; tytuł NIE decyduje o stanie pstate).
+        std::set<std::string> video_classes;
+    } dgpu;
     bool vblank_sync    = true;
     bool probe = false;
     bool dry   = false;
@@ -381,6 +421,17 @@ struct Config {
 
 static Config g_cfg;
 static std::string g_config_path; // --config lub DEFAULT_CONFIG
+
+// v5.4: nazwa stanu [dgpu-active] dla statusu/logów. Mapowanie po indeksie
+// drabinki względem configu: max (0e) = "heavy", baseline (0a) = "active",
+// 07 = "deep_idle"; idx<0 = "off". Gdy baseline==max (degeneracja) → "heavy".
+static const char* dgpu_state_name(int idx, const Config::DgpuActiveCfg& d)
+{
+    if (idx < 0) return "off";
+    if (idx == 0) return "deep_idle";
+    if (idx >= state_to_idx(d.max)) return "heavy";
+    return "active";
+}
 
 // v5.1: stan fan dla statusu (/run/reclockd/status) — aktualna krzywa + obroty.
 // Wypełniane w fan block pętli głównej, czytane przez write_status() (pstate.sh,
@@ -630,6 +681,32 @@ static bool load_config(const std::string& path, Config& cfg)
         if (section == "dgpu-soft")  { cfg.sw.dgpu_soft.insert(t);  continue; }
         if (section == "igpu")       { cfg.sw.igpu.insert(t);       continue; }
         if (section == "dgpu-procs") { cfg.sw.dgpu_procs.insert(t); continue; }
+        // v5.4: [video-classes] — klasy odtwarzaczy kwalifikujące video (mpv/vlc).
+        if (section == "video-classes") { cfg.dgpu.video_classes.insert(t); continue; }
+        // v5.4: sekcja [dgpu-active] — trójstopniowa polityka pstate dla dGPU-ON.
+        // deep-idle-busy (nowy klucz, decyzja usera 2026-08-28); activity-wake-busy
+        // akceptowany jako alias wstecz. video-* klucze z wersji roboczej raportu 79
+        // ZNIKNĘŁY (0e nie jest już video-driven) — nieznane klucze są ignorowane.
+        if (section == "dgpu-active") {
+            size_t eqa = t.find('=');
+            if (eqa == std::string::npos) continue;
+            std::string keya = trim(t.substr(0, eqa));
+            std::string vala = trim(t.substr(eqa + 1));
+            if      (keya == "enable")               cfg.dgpu.enable            = (vala == "1" || vala == "true" || vala == "yes");
+            else if (keya == "baseline")             cfg.dgpu.baseline          = parse_state(vala);
+            else if (keya == "max")                  cfg.dgpu.max               = parse_state(vala);
+            else if (keya == "low-power-ceiling")    cfg.dgpu.low_power_ceiling = parse_state(vala);
+            else if (keya == "activity-source")      cfg.dgpu.activity_source   = vala;
+            else if (keya == "activity-dwell-ms")    cfg.dgpu.activity_dwell_ms = parse_int(vala);
+            else if (keya == "deep-idle-busy")       cfg.dgpu.deep_idle_busy    = parse_int(vala);
+            else if (keya == "activity-wake-busy")   cfg.dgpu.deep_idle_busy    = parse_int(vala); // alias
+            else if (keya == "busy-enter")           cfg.dgpu.busy_enter        = parse_int(vala);
+            else if (keya == "busy-exit")            cfg.dgpu.busy_exit         = parse_int(vala);
+            else if (keya == "temp-per-profile")     cfg.dgpu.temp_per_profile  = (vala == "1" || vala == "true" || vala == "yes");
+            else if (keya == "temp-down")            cfg.dgpu.temp_down         = parse_int(vala);
+            else if (keya == "temp-up")              cfg.dgpu.temp_up           = parse_int(vala);
+            continue;
+        }
         // Sekcje [profile default] / [profile preferred] oraz ew. [global].
         size_t eq = t.find('=');
         std::string key, val;
@@ -704,6 +781,36 @@ static bool load_config(const std::string& path, Config& cfg)
     if (cfg.sw.wait_ready_timeout_ms < 0) cfg.sw.wait_ready_timeout_ms = 0;
     if (cfg.sw.pstate_settle_ms < 0) cfg.sw.pstate_settle_ms = 0;
     if (cfg.sw.pstate_write_timeout_ms < 100) cfg.sw.pstate_write_timeout_ms = 100;
+    // v5.4: sanity [dgpu-active]. Stany muszą być znane (07/0a/0e/0f) i
+    // baseline <= max. Progi busy clamp do [0,100]. activity-source: tylko
+    // "evdev" daje sygnał inputu; "none"/"cursorpos" → brak (idle po dwell).
+    if (cfg.dgpu.activity_source != "evdev" && cfg.dgpu.activity_source != "none" &&
+        cfg.dgpu.activity_source != "cursorpos")
+        cfg.dgpu.activity_source = "evdev";
+    if (cfg.dgpu.activity_dwell_ms < 0) cfg.dgpu.activity_dwell_ms = 0;
+    if (cfg.dgpu.deep_idle_busy < 0) cfg.dgpu.deep_idle_busy = 0;
+    if (cfg.dgpu.deep_idle_busy > 100) cfg.dgpu.deep_idle_busy = 100;
+    if (cfg.dgpu.busy_enter < 0) cfg.dgpu.busy_enter = 0;
+    if (cfg.dgpu.busy_enter > 100) cfg.dgpu.busy_enter = 100;
+    if (cfg.dgpu.busy_exit < 0) cfg.dgpu.busy_exit = 0;
+    if (cfg.dgpu.busy_exit > 100) cfg.dgpu.busy_exit = 100;
+    // v5.4: busy-exit MUSI być < gr-idle-promille (30%) — inaczej zejście z 0e
+    // (busy ≤ exit) będzie wiecznie deferowane przez GR-idle gate (raport 79
+    // ryzyko 7). Default 40% jest nad progiem — to świadoma histereza; przy
+    // gr-idle-promille < 400 zejście IDLE z 0e jest deferowane pod renderem.
+    if (!known_state(cfg.dgpu.baseline)) cfg.dgpu.baseline = 0x0a;
+    if (!known_state(cfg.dgpu.max)) cfg.dgpu.max = 0x0e;
+    if (!known_state(cfg.dgpu.low_power_ceiling)) cfg.dgpu.low_power_ceiling = 0x0a;
+    if (state_to_idx(cfg.dgpu.baseline) > state_to_idx(cfg.dgpu.max)) {
+        logf(0, "config: [dgpu-active] baseline > max — koryguję max=baseline");
+        cfg.dgpu.max = cfg.dgpu.baseline;
+    }
+    if (cfg.dgpu.temp_down <= cfg.dgpu.temp_up) {
+        logf(0, "config: [dgpu-active] temp-down <= temp-up (%d <= %d) — koryguję temp-up=temp-down-1",
+             cfg.dgpu.temp_down, cfg.dgpu.temp_up);
+        cfg.dgpu.temp_up = cfg.dgpu.temp_down - 1;
+        if (cfg.dgpu.temp_up < 0) cfg.dgpu.temp_up = 0;
+    }
     return true;
 }
 
@@ -2096,6 +2203,14 @@ public:
     }
     const std::string& nvram_prefs() const { return nvram_prefs_; }
 
+    // v5.4: status [dgpu-active] — wartości ustawiane przez pętlę główną co cykl.
+    void set_dgpu_active_status(const char* state, int input_active, int video)
+    {
+        dgpu_state_ = state ? state : "off";
+        dgpu_input_active_ = input_active;
+        dgpu_video_ = video;
+    }
+
     // Pełne recovery po power-cycle (kroki 2-10 wg planu). Wywoływane przez
     // wait_ready (po power-on) i przez S3 self-heal w pętli głównej.
     bool recover_after_power_on()
@@ -2258,14 +2373,22 @@ private:
     {
         auto st = power_.read();
         int igpu_freq = read_igpu_freq_mhz();
-        char buf[640];
+        char buf[768];
+        // v5.4: "dgpu_state" niesie stan pstate [dgpu-active] (active|deep_idle|
+        // heavy|off), gdy sekcja wyłączona → historyczne on/off (power). Power
+        // on/off zostaje w "dgpu_power". Nowe pola: input_active (1/0), video (1/0).
+        const char* dgpu_state_val = dgpu_state_.c_str();
+        if (!g_cfg.dgpu.enable)
+            dgpu_state_val = st.on() ? "on" : "off";
         std::snprintf(buf, sizeof buf,
             "{ \"topology\": \"%s\", \"dgpu_power\": \"%s\", \"dgpu_state\": \"%s\", "
+            "\"input_active\": %d, \"video\": %d, "
             "\"target\": \"%s\", \"override\": \"%s\", \"last_action\": \"%s\", "
             "\"last_error\": \"%s\", \"nvram_prefs\": \"%s\", \"igpu_freq_mhz\": %d, "
             "\"fan_curve\": \"%s\", \"fan_tmin\": %d, \"fan_tmax\": %d, "
             "\"fan_rpm1\": %d, \"fan_rpm2\": %d, \"ts\": %lld }\n",
-            topo_.name(), st.on() ? "on" : "off", st.on() ? "on" : "off",
+            topo_.name(), st.on() ? "on" : "off", dgpu_state_val,
+            dgpu_input_active_, dgpu_video_,
             target_name(), json_escape(override_).c_str(),
             json_escape(last_action_).c_str(),
             json_escape(last_error_).c_str(), nvram_prefs_.c_str(), igpu_freq,
@@ -2292,6 +2415,131 @@ private:
     std::chrono::steady_clock::time_point pstate_settle_until_{}; // v5.0: okno settle po power-on
     std::string override_ = "";       // aktywny dgpu-override (""|"on"|"off")
     std::string prev_override_ = "";  // poprzedni — log zmian (wzorzec fan-override)
+    // v5.4: [dgpu-active] status — ustawiane przez pętlę główną.
+    std::string dgpu_state_ = "off";
+    int dgpu_input_active_ = 0;
+    int dgpu_video_ = 0;
+};
+
+// ----------------------------------------------------------- input (evdev)
+// v5.4: detekcja aktywności usera przez /dev/input/event* (evdev). Osobny wątek
+// z poll() (timeout 500 ms) — nie kradnie zdarzeń Hyprlandowi: evdev jest
+// multicast, każdy czytelnik ma własną kolejkę (raport 79 §2.1). Każdy event
+// EV_KEY/EV_REL/EV_ABS ustawia atomowy timestamp last_activity_ms (steady_clock).
+// Brak urządzeń / activity-source != evdev → last_activity_ms() = 0 (idle po
+// dwell; wake tylko przez busy/title-change). Re-scan przy usuniętym fd.
+
+class InputReader {
+public:
+    InputReader() = default;
+    ~InputReader() { stop(); }
+
+    // Uruchom wątek tylko gdy source == "evdev". Idempotentne: stop() → start()
+    // pozwala zrestartować po SIGHUP (zmiana activity-source). Rescan jest
+    // synchroniczny — device_count() jest dokładny natychmiast po start().
+    void start(const std::string& source)
+    {
+        stop();
+        if (source != "evdev") return;
+        rescan();
+        running_ = true;
+        thread_ = std::thread([this]() { loop(); });
+    }
+
+    void stop()
+    {
+        running_ = false;
+        if (thread_.joinable()) thread_.join();   // poll ma timeout 500 ms — join szybki
+        std::lock_guard<std::mutex> lk(mu_);
+        for (int fd : fds_) close(fd);
+        fds_.clear();
+    }
+
+    // steady_clock ms ostatniego eventu; 0 = nigdy (brak urządzeń / source != evdev).
+    uint64_t last_activity_ms() const
+    {
+        return last_activity_.load(std::memory_order_relaxed);
+    }
+
+    // Liczba otwartych urządzeń evdev (0 = brak sygnału inputu).
+    int device_count() const
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        return (int)fds_.size();
+    }
+
+private:
+    void loop()
+    {
+        while (running_) {
+            std::vector<int> fds;
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                fds = fds_;
+            }
+            std::vector<struct pollfd> pfds;
+            pfds.reserve(fds.size());
+            for (int fd : fds) pfds.push_back({fd, POLLIN, 0});
+            int r = poll(pfds.data(), pfds.size(), 500);
+            if (r < 0) {
+                if (errno == EINTR) continue;
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                rescan();
+                continue;
+            }
+            if (r == 0) continue;   // timeout — brak nowych eventów
+            bool dropped = false;
+            for (size_t i = 0; i < pfds.size(); i++) {
+                if (pfds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) { dropped = true; continue; }
+                if (pfds[i].revents & POLLIN) drain(fds[i]);
+            }
+            if (dropped) rescan();   // urządzenie usunięte — prosty re-open
+        }
+    }
+
+    void drain(int fd)
+    {
+        struct input_event ev;
+        while (running_) {
+            ssize_t n = read(fd, &ev, sizeof ev);
+            if (n == (ssize_t)sizeof ev) {
+                if (ev.type == EV_KEY || ev.type == EV_REL || ev.type == EV_ABS) {
+                    auto now = std::chrono::steady_clock::now();
+                    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now.time_since_epoch()).count();
+                    last_activity_.store((uint64_t)ms, std::memory_order_relaxed);
+                }
+                // EV_SYN / EV_MSC — ignoruj (nie są aktywnością usera)
+            } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                break;   // kolejka pusta (O_NONBLOCK)
+            } else {
+                break;   // błąd / usunięte urządzenie
+            }
+        }
+    }
+
+    void rescan()
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        for (int fd : fds_) close(fd);
+        fds_.clear();
+        glob_t g;
+        if (glob("/dev/input/event*", GLOB_NOSORT, nullptr, &g) == 0) {
+            for (size_t i = 0; i < g.gl_pathc; i++) {
+                // Pomijaj urządzenia które nie dają się otworzyć (root — większość
+                // otworzy się; brak praw / chwilowa niedostępność = po prostu skip).
+                int fd = open(g.gl_pathv[i], O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+                if (fd >= 0) fds_.push_back(fd);
+            }
+            globfree(&g);
+        }
+    }
+
+    std::atomic<uint64_t> last_activity_{0};
+    std::atomic<bool> running_{false};
+    std::thread thread_;
+    mutable std::mutex mu_;       // chroni fds_
+    std::vector<int> fds_;        // pod mu_
 };
 
 // ----------------------------------------------------------- użycie
@@ -2299,11 +2547,17 @@ private:
 static void usage(const char* argv0)
 {
     std::printf(
-        "reclockd v5.3 — polityka profilowa (app-aware) + wentylatory + switchd + override + reload + nvram cache\n"
+        "reclockd v5.4 — polityka profilowa (app-aware) + wentylatory + switchd + [dgpu-active] + override + reload + nvram cache\n"
         "Użycie: %s [opcje]\n"
         "  switchd (v5.0): dGPU power-state + render routing. W DIS = monitor\n"
         "    (zero zmian power). Sekcje [switch]/[dpower]/[dgpu-hard]/[dgpu-soft]\n"
         "    /[igpu]/[dgpu-procs]. Status: /run/reclockd/status.\n"
+        "  [dgpu-active] (v5.4): trójstopniowa polityka dla CAŁEGO dGPU-ON:\n"
+        "    baseline (0a) / deep idle (07) / heavy (0e). Aktywność usera przez\n"
+        "    evdev (/dev/input/event*). 0e WYŁĄCZNIE busy-driven (busy>busy-enter\n"
+        "    + temp<temp-up); tytuł/klasa video tylko informacyjnie. [caps] floor\n"
+        "    = twarde minimum, low-power ceiling, termalne per-profil. enable=false\n"
+        "    → stara logika. Status: dgpu_state/input_active/video.\n"
         "  Profile: default (cap 07) ↔ preferred (cap 0e).\n"
         "  Bezpieczna drabinka AUTO: 07 ↔ 0a ↔ 0e. 0f = BOOST TIER nad drabinką\n"
         "  (wchodzi z 0e przy sustained busy>busy-boost AND temp<temp-up).\n"
@@ -2562,6 +2816,17 @@ int main(int argc, char** argv)
     // ceiling (0e). Każda zmiana boost resetuje dwell-countery.
     bool g_boost_active = false;
 
+    // v5.4: [dgpu-active] — stan maszyny (status + sygnały).
+    // last_activity_ts = steady_clock ms ostatniej aktywności (evdev input /
+    // zmiana tytułu/klasy / busy >= deep-idle-busy); 0 = brak aktywności nigdy.
+    uint64_t last_activity_ts = 0;
+    std::string prev_focused_class;
+    std::string prev_focused_title;
+    std::string dgpu_state_str = "off";   // "off"|"active"|"deep_idle"|"heavy"
+    int dgpu_input_active = 0;
+    int dgpu_video = 0;
+    bool prev_title_video = false;   // log informacyjny zmiany statusu video
+
     auto reset_after_transition = [&]() {
         ring.clear();
         temp_low_dwell = temp_high_dwell = idle_dwell = 0;
@@ -2572,6 +2837,11 @@ int main(int argc, char** argv)
     Switchd sw(gpu, hw, g_cfg.sw);
     sw.set_reset_cb(reset_after_transition);
     sw.init();
+
+    // v5.4: detekcja aktywności usera przez evdev (osobny wątek).
+    InputReader input;
+    std::string current_input_source = g_cfg.dgpu.activity_source;
+    input.start(current_input_source);
 
     // Stan profilu + rate-limit.
     bool pref_active = false;
@@ -2591,14 +2861,23 @@ int main(int argc, char** argv)
     int prev_fan_rpm1 = -1, prev_fan_rpm2 = -1;
     bool prev_fan_override = false;
 
-    logf(1, "start v5.3: interval=%dms poll=%dms, "
+    // v5.4: [dgpu-active] — status w start logu.
+    std::string dgpu_active_log = "off";
+    if (g_cfg.dgpu.enable) {
+        dgpu_active_log = std::string("tak baseline=") + state_hex(g_cfg.dgpu.baseline) +
+                          " max=" + state_hex(g_cfg.dgpu.max) +
+                          " evdev=" + std::to_string(input.device_count()) + " urz.";
+    }
+
+    logf(1, "start v5.4: interval=%dms poll=%dms, "
             "default[cap=%s temp-up=%d temp-down=%d], "
             "preferred[cap=%s boost=%s busy-boost=%d%% boost-dwell=%dms "
             "temp-up=%d temp-down=%d], "
             "busy-up=%d%% busy-down=%d%%, temp-dwell=%dms idle-dwell=%dms, "
             "profile-dwell=%dms, hwmon=%s, hypr=%s, vblank=%d, "
             "gr-idle=%d‰, preferred-titles=%zu, low-power=%zu, "
-            "fan=%s temp[%d-%d] igd[%d-%d] fan1[%d-%d] fan2[%d-%d], stan=%s, switch=%s",
+            "fan=%s temp[%d-%d] igd[%d-%d] fan1[%d-%d] fan2[%d-%d], stan=%s, switch=%s, "
+            "dgpu-active=%s",
          g_cfg.interval_ms, g_cfg.poll_ms,
          state_hex(g_cfg.def.max_pstate), g_cfg.def.temp_up, g_cfg.def.temp_down,
          state_hex(g_cfg.preferred.max_pstate),
@@ -2615,7 +2894,7 @@ int main(int argc, char** argv)
          g_cfg.fan_temp_min, g_cfg.fan_temp_max,
          g_cfg.fan_temp_min_igd, g_cfg.fan_temp_max_igd,
          fan.fan1_min(), fan.fan1_max(), fan.fan2_min(), fan.fan2_max(),
-         cur.c_str(), sw.mode_name());
+         cur.c_str(), sw.mode_name(), dgpu_active_log.c_str());
 
     const int busy_up_pp   = g_cfg.busy_up   * 10;
     const int busy_down_pp = g_cfg.busy_down * 10;
@@ -2652,6 +2931,14 @@ int main(int argc, char** argv)
         }
 
         int temp = hw.read_temp();   // v5.0: przeniesione wyżej (współdzielone)
+
+        // v5.4: restart InputReadera gdy SIGHUP zmienił activity-source.
+        if (current_input_source != g_cfg.dgpu.activity_source) {
+            logf(1, "input: activity-source %s -> %s (restart czytnika)",
+                 current_input_source.c_str(), g_cfg.dgpu.activity_source.c_str());
+            current_input_source = g_cfg.dgpu.activity_source;
+            input.start(current_input_source);
+        }
 
         // v5.0: switchd tick (co poll_cycles) — ZAWSZE, niezależnie od stanu dGPU.
         // Własne hyprctl (activewindow) + g_last_busy + temp.
@@ -2732,6 +3019,11 @@ int main(int argc, char** argv)
                                // na ostatniej wartości (np. 1000‰) i switchd tick
                                // (miękka promocja busy-gated) widzi busy z martwej
                                // karty. Po fixie on() (= vgasw Off) to realny stan.
+            // v5.4: status — dGPU OFF, [dgpu-active] nieaktywny.
+            if (g_cfg.dgpu.enable) {
+                dgpu_state_str = "off"; dgpu_input_active = 0; dgpu_video = 0;
+                sw.set_dgpu_active_status(dgpu_state_str.c_str(), dgpu_input_active, dgpu_video);
+            }
             cycle++; continue;
         }
 
@@ -2742,6 +3034,12 @@ int main(int argc, char** argv)
             if (g_cfg.verbosity >= 2)
                 logf(2, "pstate: settle po power-on (%dms) — pomijam decyzję",
                      sw.pstate_settle_remaining_ms());
+            // v5.4: status — nowa logika wstrzymana do końca settle.
+            if (g_cfg.dgpu.enable) {
+                dgpu_state_str = (g_cur_idx >= 0 && g_cur_idx < LADDER_N)
+                                 ? dgpu_state_name(g_cur_idx, g_cfg.dgpu) : "settle";
+                sw.set_dgpu_active_status(dgpu_state_str.c_str(), dgpu_input_active, dgpu_video);
+            }
             cycle++; continue;
         }
 
@@ -2884,9 +3182,17 @@ int main(int argc, char** argv)
             // obsługiwany przez [caps] (floor/busy-gate), nie force-0e po tytule.
             // Karta Discord w przeglądarce (chromium itd., NIE w [caps]) zachowuje
             // title-priority force-0e.
+            // v5.4: przy [dgpu-active] tytuł NIE ustawia title_pref (force-0e znika) —
+            // zostaje kwalifikatorem video (obliczanym niżej); pref_sig (profil dla
+            // progów termalnych) nadal dostaje tytuł jako fallback dla przeglądarek
+            // spoza [preferred].
             if (!focused_title.empty() && !cap_class_focused) {
                 for (auto& t : g_cfg.preferred_titles) {
-                    if (icontains(focused_title, t)) { pref_sig = true; title_pref = true; break; }
+                    if (icontains(focused_title, t)) {
+                        pref_sig = true;
+                        if (!g_cfg.dgpu.enable) title_pref = true;
+                        break;
+                    }
                 }
             }
         }
@@ -2907,7 +3213,10 @@ int main(int argc, char** argv)
         int ceiling = state_to_idx(prof.max_pstate);
         // v4.4: [caps] — ceiling (max), floor (stan spoczynkowy) i własny busy-up.
         int cap_floor = -1;                       // idx w LADDER; -1 = brak
-        int class_busy_up_pp = busy_up_pp;        // ‰ busy do UP-LOAD
+        // v5.4: przy [dgpu-active] generalny próg UP-LOAD = busy-enter z sekcji
+        // (default 80), nie globalny busy-up. [caps] busy-up nadal per-klasowo.
+        int class_busy_up_pp = g_cfg.dgpu.enable ? g_cfg.dgpu.busy_enter * 10
+                                                 : busy_up_pp; // ‰ busy do UP-LOAD
         if (ccap) {
             if (ccap->max >= 0) {
                 int max_idx = state_to_idx(ccap->max);
@@ -2928,14 +3237,70 @@ int main(int argc, char** argv)
                                     known_state(prof.boost_pstate) &&
                                     state_to_idx(prof.boost_pstate) < 0);
 
+        // v5.4: [dgpu-active] — sygnały + aktywacja. title_video jest INFORMACYJNY
+        // (status/log „video: ...", decyzja usera #4) — NIE decyduje o stanie
+        // pstate: 0e wchodzi wyłącznie przez busy > busy-enter (+ termalne).
+        bool title_video = false;
+        if (g_cfg.dgpu.enable && hypr_alive && !cap_class_focused) {
+            if (!focused_title.empty()) {
+                for (auto& t : g_cfg.preferred_titles)
+                    if (icontains(focused_title, t)) { title_video = true; break; }
+            }
+            if (!title_video && !focused_class.empty() &&
+                g_cfg.dgpu.video_classes.count(focused_class))
+                title_video = true;
+        }
+
+        // v5.4: tytuł video = INFORMACYJNY — log przy zmianie (decyzja usera #4).
+        if (g_cfg.dgpu.enable && title_video != prev_title_video) {
+            logf(1, "dgpu-active: video=%s (tytuł: \"%s\", klasa: %s) — informacyjnie, "
+                    "0e wyłącznie przez busy",
+                 title_video ? "TAK" : "NIE",
+                 focused_title.c_str(), focused_class.c_str());
+            prev_title_video = title_video;
+        }
+
+        // v5.4: last_activity_ts — źródła aktywności: evdev input, zmiana
+        // tytułu/klasy okna, busy >= deep-idle-busy (GPU renderuje — animowana
+        // strona bez scrolla trzyma floor 0a). no_input_ms to czas od
+        // najpóźniejszego z nich; floor spada do 07 gdy ≥ dwell.
+        uint64_t now_ms = 0;
+        uint64_t no_input_ms = 0;   // 0 gdy aktywność świeża; UINT64_MAX gdy nigdy
+        if (g_cfg.dgpu.enable) {
+            auto now = std::chrono::steady_clock::now();
+            now_ms = (uint64_t)std::chrono::duration_cast<
+                std::chrono::milliseconds>(now.time_since_epoch()).count();
+            uint64_t ia = input.last_activity_ms();
+            if (ia > last_activity_ts) last_activity_ts = ia;
+            if (focused_class != prev_focused_class || focused_title != prev_focused_title) {
+                last_activity_ts = now_ms;
+                prev_focused_class = focused_class;
+                prev_focused_title = focused_title;
+            }
+            if ((int)busy_avg >= g_cfg.dgpu.deep_idle_busy * 10)
+                last_activity_ts = now_ms;
+            no_input_ms = (last_activity_ts == 0)
+                          ? UINT64_MAX : (now_ms > last_activity_ts ? now_ms - last_activity_ts : 0);
+        }
+
+        // v5.4: termalne [dgpu-active] — per-profil (wg focusa) lub wspólne.
+        // Gdy sekcja wyłączona: td/tu = wartości profilu (temp-per-profile=true
+        // default) — identycznie jak dotychczas.
+        const int td = g_cfg.dgpu.temp_per_profile ? prof.temp_down : g_cfg.dgpu.temp_down;
+        const int tu = g_cfg.dgpu.temp_per_profile ? prof.temp_up   : g_cfg.dgpu.temp_up;
+
         // Dwell-countery.
         if (temp >= 0) {
-            temp_low_dwell  = (temp <  prof.temp_up)   ? temp_low_dwell  + g_cfg.interval_ms : 0;
-            temp_high_dwell = (temp >  prof.temp_down) ? temp_high_dwell + g_cfg.interval_ms : 0;
+            temp_low_dwell  = (temp <  tu) ? temp_low_dwell  + g_cfg.interval_ms : 0;
+            temp_high_dwell = (temp >  td) ? temp_high_dwell + g_cfg.interval_ms : 0;
         } else {
             temp_low_dwell = temp_high_dwell = 0;
         }
-        idle_dwell = ((int)busy_avg <= busy_down_pp)
+        // v5.4: próg IDLE — przy [dgpu-active] busy-exit z sekcji (default 40),
+        // inaczej globalny busy-down (40). Histereza 80/40 w obu przypadkach.
+        const int idle_down_pp = g_cfg.dgpu.enable ? g_cfg.dgpu.busy_exit * 10
+                                                   : busy_down_pp;
+        idle_dwell = ((int)busy_avg <= idle_down_pp)
                      ? idle_dwell + g_cfg.interval_ms : 0;
         boost_up_dwell = ((int)busy_avg >  busy_boost_pp)
                          ? boost_up_dwell + g_cfg.interval_ms : 0;
@@ -2960,6 +3325,11 @@ int main(int argc, char** argv)
             } else {
                 g_cur_idx = 0;
             }
+            // v5.4: status — stan po init (deep_idle 07).
+            if (g_cfg.dgpu.enable) {
+                dgpu_state_str = dgpu_state_name(g_cur_idx, g_cfg.dgpu);
+                sw.set_dgpu_active_status(dgpu_state_str.c_str(), dgpu_input_active, dgpu_video);
+            }
             continue;
         }
 
@@ -2970,7 +3340,130 @@ int main(int argc, char** argv)
         // pamięci) = true (ryzyko wedge'a GR mid-render); UP-LOAD/BOOST-UP = false
         // (rosnący zegar bezpieczniejszy; UP wymaga busy>80% więc gate blokowałby).
         bool needs_gr_idle = false;
+        // v5.4: [dgpu-active] — ceiling/floor dynamiczne (do logu verbose).
+        int dgpu_ceiling = -1, dgpu_floor = -1;
 
+        // ---- v5.4: [dgpu-active] — trójstopniowa maszyna stanów dla dGPU-ON ----
+        // Gdy enable: ceiling/floor DYNAMICZNE dla wszystkich aplikacji (raport 79
+        // §3.6 + decyzje usera 2026-08-28). Boost (0f) wyłączony; title_pref nie
+        // istnieje (tytuł = INFORMACYJNY — nie decyduje o 0e). 0e wyłącznie przez
+        // busy > busy-enter + margines termalny. Kolejność gałęzi: WAKE → TERMAL →
+        // IDLE → CEILING → UP-FLOOR → UP-LOAD (TERMAL > DOWN > UP, jak stara
+        // logika). Stany: DEEP_IDLE(07) / ACTIVE(baseline 0a) / HEAVY(max 0e).
+        // Przejścia zawsze o 1 poziom (nigdy skok 07→0e). GR-idle gate chroni
+        // wszystkie DOWN.
+        if (g_cfg.dgpu.enable) {
+            const int baseline_idx = state_to_idx(g_cfg.dgpu.baseline);
+            const int max_idx      = state_to_idx(g_cfg.dgpu.max);
+
+            // --- ceiling (dynamiczny, uogólniony) ---
+            //   low-power focus (terminal) → low-power-ceiling (0a) — tło nie
+            //     dostaje 0e (decyzja usera #7)
+            //   busy > busy-enter ([caps] busy-up per-klasowo) sustained → max (0e)
+            //   inaczej → baseline (0a) — 0e WYŁĄCZNIE busy-driven (decyzja usera #2)
+            int ceiling_dg;
+            if (low_power_focused)
+                ceiling_dg = state_to_idx(g_cfg.dgpu.low_power_ceiling);
+            else if ((int)busy_avg > class_busy_up_pp)
+                ceiling_dg = max_idx;
+            else
+                ceiling_dg = baseline_idx;
+            if (ccap && ccap->max >= 0) {   // [caps] własny ceiling — respektuj
+                int m = state_to_idx(ccap->max);
+                if (m >= 0 && m < ceiling_dg) ceiling_dg = m;
+            }
+            if (ceiling_dg < 0) ceiling_dg = 0;
+
+            // --- floor (dynamiczny, wspólny dla wszystkich apk) ---
+            //   aktywność (input evdev / świeży tytuł / busy >= deep-idle-busy) →
+            //     baseline (0a) — YouTube (~25-36% busy) trzyma 0a
+            //   brak aktywności ≥ activity-dwell-ms ORAZ busy < deep-idle-busy →
+            //     07 (deep idle) — 480p (busy < 20%) może zejść do 07 (decyzja #3)
+            //   [caps] floor = TWARDE minimum: floor = max(cap_floor, dynamic)
+            bool floor_active = (last_activity_ts != 0) &&
+                                no_input_ms < (uint64_t)g_cfg.dgpu.activity_dwell_ms;
+            bool busy_above_wake = (int)busy_avg >= g_cfg.dgpu.deep_idle_busy * 10;
+            int floor_dynamic;
+            if (floor_active || busy_above_wake)
+                floor_dynamic = baseline_idx;
+            else if (no_input_ms >= (uint64_t)g_cfg.dgpu.activity_dwell_ms)
+                floor_dynamic = 0;              // 07 — deep idle
+            else
+                floor_dynamic = baseline_idx;   // dwell nie minął — trzymaj baseline
+            int floor = std::max(cap_floor, floor_dynamic);
+            dgpu_ceiling = ceiling_dg;
+            dgpu_floor = floor;
+
+            // --- WAKE (W1): szybka ścieżka 07→0a (≤1 s) po aktywności. Nie czeka
+            // na temp_low_dwell (responsywność — decyzja usera #4); gate: temp <
+            // temp_down (jedna próbka) — nie budź się w trakcie throttle termicznego.
+            if (g_cur_idx < floor && floor >= baseline_idx &&
+                temp >= 0 && temp < td) {
+                target = g_cur_idx + 1;
+                reason = "WAKE-ACTIVITY";
+                needs_gr_idle = false;
+            }
+            // --- DOWN ---
+            else if (temp >= 0 && temp_high_dwell >= g_cfg.temp_dwell_ms && g_cur_idx > 0) {
+                target = g_cur_idx - 1;
+                reason = "TERMAL";               // T1/T2 — nadrzędne (może zejść poniżej floor)
+                needs_gr_idle = true;
+            }
+            // D2/D3 (IDLE): g_cur_idx > floor — zejście na floor. 0e→0a gdy
+            // busy spadł (ceiling wrócił do baseline); 0a→07 gdy floor spadł
+            // po bezczynności (no-input ≥ activity-dwell ORAZ busy < deep-idle-busy).
+            else if (g_cur_idx > 0 && idle_dwell >= g_cfg.idle_dwell_ms &&
+                     g_cur_idx > floor) {
+                target = g_cur_idx - 1;
+                reason = "IDLE";
+                needs_gr_idle = true;
+            }
+            else if (g_cur_idx > ceiling_dg) {
+                target = g_cur_idx - 1;
+                reason = "CEILING";
+                needs_gr_idle = true;
+            }
+            // --- UP ---
+            // UP-FLOOR: powrót do floor (np. [caps] 0a po TERMAL; lub 07→0a gdy
+            // WAKE nie przeszedł przez temp). Wymaga temp_low_dwell (bezpieczne).
+            else if (floor >= 0 && g_cur_idx < ceiling_dg && g_cur_idx < floor &&
+                     temp >= 0 && temp_low_dwell >= g_cfg.temp_dwell_ms) {
+                target = g_cur_idx + 1;
+                reason = "UP-FLOOR";
+            }
+            // W3 (UP-LOAD): busy > busy-enter sustained (80%; [caps] busy-up
+            // per-klasowo) ORAZ temp < temp-up (margines termalny). Jedyna droga
+            // do 0e. UP NIE gate'owane GR-idle.
+            else if (g_cur_idx < ceiling_dg && temp >= 0 &&
+                     temp_low_dwell >= g_cfg.temp_dwell_ms &&
+                     (int)busy_avg > class_busy_up_pp) {
+                target = g_cur_idx + 1;
+                reason = "UP-LOAD";
+            }
+
+            // dgpu-active nie używa boost — gdyby daemon był na 0f (przejście z
+            // trybu bez dgpu-active po SIGHUP reload), zejdź na drabinkę.
+            if (g_boost_active) {
+                next_boost = false;
+                target = std::min(ceiling_dg, LADDER_N - 1);
+                reason = "DGPU-ACTIVE-EXIT-BOOST";
+                needs_gr_idle = true;
+            }
+
+            // Status (pisany co poll_cycles przez sw.tick → write_status).
+            // video = INFORMACYJNE (z tytułu, decyzja usera #4) — nie decyduje
+            // o stanie; dgpu_state wybiera busy. input_active = CZYSTY input
+            // evdev (diagnostyczny) — floor używa złożonego floor_active
+            // (input + zmiana tytułu + busy ≥ deep-idle-busy).
+            uint64_t ev_last = input.last_activity_ms();
+            bool ev_active = (ev_last != 0) && now_ms > ev_last &&
+                             (now_ms - ev_last) < (uint64_t)g_cfg.dgpu.activity_dwell_ms;
+            dgpu_input_active = ev_active ? 1 : 0;
+            dgpu_video = title_video ? 1 : 0;
+            dgpu_state_str = (g_cur_idx >= 0 && g_cur_idx < LADDER_N)
+                             ? dgpu_state_name(g_cur_idx, g_cfg.dgpu) : "off";
+            sw.set_dgpu_active_status(dgpu_state_str.c_str(), dgpu_input_active, dgpu_video);
+        } else {
         // ---- BOOST TIER (0f) — nad drabinką, straż termiczna priorytetowa ----
         if (g_boost_active) {
             // EXIT boost — TERMAL (NATYCHMIAST, priorytet nad loadem):
@@ -3058,6 +3551,7 @@ int main(int argc, char** argv)
                 reason = title_pref ? "UP-TITLE" : "UP-LOAD";
             }
         }
+        }
 
         // ---- WYKONANIE ----
         const bool boost_changed = (next_boost != g_boost_active);
@@ -3111,11 +3605,21 @@ int main(int argc, char** argv)
         } else if (!next_boost && target != g_cur_idx &&
                    target >= 0 && target < LADDER_N) {
             float busy_pct = busy_avg / 10.0f;
-            logf(1, "%s zmiana pstate: %s -> %s (busy=%.0f%%, temp=%d°C, %s, profil=%s)",
-                 g_cfg.dry ? "dry-run:" : ">>",
-                 state_hex(LADDER[g_cur_idx]), state_hex(LADDER[target]),
-                 busy_pct, temp, reason ? reason : "?",
-                 pref_active ? "preferred" : "default");
+            if (g_cfg.dgpu.enable)
+                logf(1, "%s dgpu-active: %s -> %s (busy=%.0f%%, temp=%d°C, %s, "
+                        "profil=%s, input=%d, video=%d)",
+                     g_cfg.dry ? "dry-run:" : ">>",
+                     dgpu_state_name(g_cur_idx, g_cfg.dgpu),
+                     dgpu_state_name(target, g_cfg.dgpu),
+                     busy_pct, temp, reason ? reason : "?",
+                     pref_active ? "preferred" : "default",
+                     dgpu_input_active, dgpu_video);
+            else
+                logf(1, "%s zmiana pstate: %s -> %s (busy=%.0f%%, temp=%d°C, %s, profil=%s)",
+                     g_cfg.dry ? "dry-run:" : ">>",
+                     state_hex(LADDER[g_cur_idx]), state_hex(LADDER[target]),
+                     busy_pct, temp, reason ? reason : "?",
+                     pref_active ? "preferred" : "default");
             if (!g_cfg.dry) {
                 if (g_cfg.vblank_sync) drm_vblank_wait();
                 if (set_pstate(LADDER[target]) == 0) {
@@ -3130,15 +3634,26 @@ int main(int argc, char** argv)
             }
         } else if (g_cfg.verbosity >= 2) {
             float busy_pct = busy_avg / 10.0f;
-            logf(2, "stan %s, busy=%.0f%%, temp=%d°C, profil=%s, ceiling=%d, "
-                    "boost=%s, dwell[low=%d hi=%d idle=%d bu=%d] pref=%d",
-                 g_boost_active ? state_hex((uint32_t)prof.boost_pstate)
-                                : state_hex(LADDER[g_cur_idx]),
-                 busy_pct, temp,
-                 pref_active ? "pref" : "def", ceiling,
-                 g_boost_active ? "ON" : (boost_enabled ? "off" : "-"),
-                 temp_low_dwell, temp_high_dwell, idle_dwell,
-                 boost_up_dwell, pref_dwell);
+            if (g_cfg.dgpu.enable) {
+                logf(2, "dgpu-active stan %s, busy=%.0f%%, temp=%d°C, ceiling=%d, "
+                        "floor=%d, input=%d, video=%d, noinput=%llu ms, "
+                        "dwell[low=%d hi=%d idle=%d]",
+                     dgpu_state_name(g_cur_idx, g_cfg.dgpu),
+                     busy_pct, temp, dgpu_ceiling, dgpu_floor,
+                     dgpu_input_active, dgpu_video,
+                     (unsigned long long)no_input_ms,
+                     temp_low_dwell, temp_high_dwell, idle_dwell);
+            } else {
+                logf(2, "stan %s, busy=%.0f%%, temp=%d°C, profil=%s, ceiling=%d, "
+                        "boost=%s, dwell[low=%d hi=%d idle=%d bu=%d] pref=%d",
+                     g_boost_active ? state_hex((uint32_t)prof.boost_pstate)
+                                    : state_hex(LADDER[g_cur_idx]),
+                     busy_pct, temp,
+                     pref_active ? "pref" : "def", ceiling,
+                     g_boost_active ? "ON" : (boost_enabled ? "off" : "-"),
+                     temp_low_dwell, temp_high_dwell, idle_dwell,
+                     boost_up_dwell, pref_dwell);
+            }
         }
     }
 
