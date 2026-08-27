@@ -175,6 +175,15 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   (first clock change after D3hot→D0 can hang the nouveau workqueue),
   `pstate-write-timeout-ms` timeouts a stuck pstate write. CLI:
   `reclockctl switch-status | dgpu-on | dgpu-off | dgpu-auto | to-igd | to-dis`.
+- 🌬 **iGPU-only fan curve (v5.1)**: with only the iGPU active (dGPU OFF in
+  IGD topology) the nouveau hwmon disappears, so the fan driver reads the CPU
+  (`coretemp`) temperature — which can safely run hotter than the dGPU. A
+  separate, quieter curve applies: `temp-min-igd` / `temp-max-igd` (defaults
+  41/91 °C) — fans hit max at 91 °C instead of 67 °C. The curve is chosen by
+  the dGPU **power state** (`sw.dgpu_off()`), not the topology: OFF → iGPU
+  curve, ON → the standard 40/67 °C. `pstate.sh status` now also prints an
+  `=== wentylatory ===` section — the active curve + range + RPMs from
+  `/run/reclockd/status` (applesmc sysfs fallback when the daemon is down).
 - 🌡 **Per-profile thermal guard**: thermal downclock is **per-profile**, not
   global. `default` throttles at 65°C / recovers below 58°C; `preferred`
   throttles at 82°C / recovers below 75°C. Thermal down is prioritized over
@@ -266,7 +275,7 @@ reclocked/
 │   ├── 81-nouveau-kepler.rules           udev rule: force-load nouveau (bypass nvidia-utils blacklist)
 │   ├── reclockd.conf-caps.diff           reclockd.conf diff — [caps] Discord 0a/0e busy-gated
 │   ├── reclockd.conf-compiler.diff       reclockd.conf diff — [compiler] fan boost
-│   └── kernel/                           MacBook Pro 11,3 kernel series 0002-0013
+│   └── kernel/                           MacBook Pro 11,3 kernel series 0002-0014
 ├── install-udev-rule.sh            installs the udev rule above
 ├── pstate.sh                       inspect/force pstate via debugfs (+ iGPU RPS / coretemp)
 ├── build-mesa.sh                   build patched Mesa (nouveau-only)
@@ -498,9 +507,18 @@ preferred app is busy in the background.
 | `enable` | `true` | Enable applesmc fan control. |
 | `temp-min` | `40` | °C at/below which fans sit at `fanN_min`. |
 | `temp-max` | `67` | °C at/above which fans sit at `fanN_max`. |
+| `temp-min-igd` | `41` | °C (iGPU-only, dGPU OFF) at/below which fans sit at `fanN_min`. |
+| `temp-max-igd` | `91` | °C (iGPU-only, dGPU OFF) at/above which fans sit at `fanN_max`. |
 
 RPM is linearly interpolated between `fanN_min` and `fanN_max`, which are read
 dynamically from sysfs at startup. Disabled silently if applesmc is absent.
+
+When the dGPU is OFF (switchd, IGD topology) the nouveau hwmon disappears and
+the fan temperature becomes the CPU (`coretemp`) — which can safely run hotter
+than the dGPU, hence the separate quieter iGPU curve (defaults 41/91 °C, v5.1).
+With the dGPU ON the standard `temp-min`/`temp-max` (40/67 °C) curve applies.
+The curve is chosen by the dGPU **power state** (`sw.dgpu_off()`), not the
+topology.
 
 ### `[profile default]` — non-preferred apps (terminal/editor)
 
@@ -690,11 +708,11 @@ sudo udevadm control --reload-rules
 # reboot, albo natychmiast: sudo modprobe nouveau
 ```
 
-### `patches/kernel/` — MacBook Pro 11,3 kernel series (0002-0013)
+### `patches/kernel/` — MacBook Pro 11,3 kernel series (0002-0014)
 
 Kernel patch series for the dual-GPU MacBook Pro 15" Late 2013 (Intel iGPU +
 NVIDIA GT 750M on a `gmux` mux). Applied in order by `build-kernel.sh` to a
-Linux v7.1.8 tree (`0001` from `patches/` first, then `0002`-`0013`):
+Linux v7.1.8 tree (`0001` from `patches/` first, then `0002`-`0014`):
 
 | patch | area | fix |
 |---|---|---|
@@ -710,6 +728,7 @@ Linux v7.1.8 tree (`0001` from `patches/` first, then `0002`-`0013`):
 | `0011` | nouveau | poll PCIe link before D0 |
 | `0012` | nouveau | PMU reply timeout (`gt215_pmu_send`) |
 | `0013` | nouveau | pstate calc timeout (`nvkm_pstate_calc`) |
+| `0014` | nouveau | IRQ_HANDLED for the private MSI line (fix `Disabling IRQ #91`) |
 
 `0011`-`0013` fix a real hang: after a power-on (gmux power-cut → D3hot→D0),
 `pci_power_up` reads PMCSR before the PCIe link has trained, gets
@@ -718,6 +737,15 @@ Linux v7.1.8 tree (`0001` from `patches/` first, then `0002`-`0013`):
 kernel threads, black screen. `0011` polls the link up to 2 s before D0 in
 both resume paths; `0012`/`0013` add 2 s timeouts to the PMU reply and the
 pstate workqueue as a safety net.
+
+`0014` claims the private MSI line as handled: on the MBP 11,3 the nonstall
+fence notify is routed to the separate NRHOST interrupt (leaf 1), which has no
+handler in `gk104_mc_intrs[]`. A nonstall flood (e.g. glmark2
+`--frame-end none` at ~8000 FPS) makes `nvkm_intr()` return `IRQ_NONE`, and
+the kernel's spurious-interrupt detector disables the line ("irq 91: nobody
+cared ... Disabling IRQ #91") after 100k IRQ_NONE — the dGPU is then unusable
+until reboot. The source block still runs above as protection; the line is
+only claimed as handled so the detector stays out of it.
 
 ---
 
@@ -731,6 +759,10 @@ mode; `auto` clears it. Requires root for the debugfs write. v5.0 additions:
 when the dGPU is OFF (switchd), `status` falls back to the CPU `coretemp`
 temperature and also shows the iGPU RPS monitoring (read-only), and `set`
 refuses to write pstate — a pstate write on a power-cut card hangs nouveau.
+v5.1 addition: `status` also prints an `=== wentylatory ===` section — the
+active fan curve (`igd | dga | compiler | override | off`), its temperature
+range and the current RPMs, read from `/run/reclockd/status` (applesmc sysfs
+fallback when the daemon is down).
 
 ### `build-mesa.sh`
 
