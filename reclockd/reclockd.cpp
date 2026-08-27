@@ -142,6 +142,14 @@
 //      wymusza target PRZED polityką (decide pominięty). Override "off" nadal
 //      przechodzi przez bramki apply(): wait_idle (tylko węzły dGPU — lekcja
 //      G1 live) + set_off + wait_off. Status: pole "override" (""|"on"|"off").
+//
+// v5.1 (2026-08-27):
+//   O. FAN CURVE IGPU-ONLY: osobna krzywa wentylatorów gdy włączone jest tylko
+//      iGPU (dGPU OFF — w IGD hwmon nouveau znika, temp=CPU/coretemp). Sekcja
+//      [fan] zyskuje klucze temp-min-igd/temp-max-igd (domyślnie 41/91°C) —
+//      cichsza: wiatraki wchodzą na max dopiero przy 91°C zamiast 67°C. Gdy dGPU
+//      ON → krzywa standardowa temp-min/temp-max (40/67). Wybór krzywej wg
+//      sw.dgpu_off() (stan power dGPU), niezależny od topologii.
 
 #include <algorithm>
 #include <atomic>
@@ -312,6 +320,11 @@ struct Config {
     bool fan_enable     = true;
     int  fan_temp_min   = 40;     // °C → min RPM (najcicho)
     int  fan_temp_max   = 67;     // °C → max RPM (najgłośniej)
+    // v5.1: osobna krzywa gdy tylko iGPU (dGPU OFF) — cichsza. Gdy dGPU OFF hwmon
+    // nouveau znika, temp = CPU (coretemp); CPU może się grzać wyżej zanim wiatraki
+    // wejdą na max. Wybór w pętli: sw.dgpu_off() → krzywa igd, inaczej standardowa.
+    int  fan_temp_min_igd = 41;   // °C → min RPM (tryb tylko-iGPU)
+    int  fan_temp_max_igd = 91;   // °C → max RPM (tryb tylko-iGPU)
     // v4.6: sekcja [compiler] — boost wentylatorów gdy wykryty kompilator
     // (skan /proc/*/comm z fallbackiem na cmdline). fan_max = % maksymalnych
     // RPM (100 = pełne wiatraki). names = dodatkowe nazwy do wykrycia (przecinkami).
@@ -360,6 +373,13 @@ struct Config {
 
 static Config g_cfg;
 static std::string g_config_path; // --config lub DEFAULT_CONFIG
+
+// v5.1: stan fan dla statusu (/run/reclockd/status) — aktualna krzywa + obroty.
+// Wypełniane w fan block pętli głównej, czytane przez write_status() (pstate.sh,
+// pasek Omarchy). off|override|compiler|igd|dga; tmin/tmax = aktywny zakres.
+static std::string g_fan_curve = "off";
+static int  g_fan_tmin = 40, g_fan_tmax = 67;
+static int  g_fan_rpm1 = 0, g_fan_rpm2 = 0;
 
 // ------------------------------------------------------------------ pomocnicze
 
@@ -527,14 +547,17 @@ static bool load_config(const std::string& path, Config& cfg)
             continue;
         }
         // v4.2: sekcja [fan] — klucze klucz=wartość (enable/temp-min/temp-max).
+        // v5.1: temp-min-igd/temp-max-igd — krzywa gdy tylko iGPU (dGPU OFF).
         if (section == "fan") {
             size_t eqf = t.find('=');
             if (eqf == std::string::npos) continue;
             std::string keyf = trim(t.substr(0, eqf));
             std::string valf = trim(t.substr(eqf + 1));
-            if      (keyf == "enable")   cfg.fan_enable   = (valf == "1" || valf == "true" || valf == "yes");
-            else if (keyf == "temp-min") cfg.fan_temp_min = parse_int(valf);
-            else if (keyf == "temp-max") cfg.fan_temp_max = parse_int(valf);
+            if      (keyf == "enable")      cfg.fan_enable     = (valf == "1" || valf == "true" || valf == "yes");
+            else if (keyf == "temp-min")    cfg.fan_temp_min   = parse_int(valf);
+            else if (keyf == "temp-max")    cfg.fan_temp_max   = parse_int(valf);
+            else if (keyf == "temp-min-igd") cfg.fan_temp_min_igd = parse_int(valf);
+            else if (keyf == "temp-max-igd") cfg.fan_temp_max_igd = parse_int(valf);
             continue;
         }
         // v4.6: sekcja [compiler] — boost wentylatorów gdy wykryty kompilator.
@@ -644,6 +667,12 @@ static bool load_config(const std::string& path, Config& cfg)
         logf(0, "config: fan temp-max <= temp-min (%d <= %d) — koryguję na 40/67",
              cfg.fan_temp_max, cfg.fan_temp_min);
         cfg.fan_temp_min = 40; cfg.fan_temp_max = 67;
+    }
+    // v5.1: sanity krzywa igd (tylko-iGPU) — analogicznie, korekta na 41/91.
+    if (cfg.fan_temp_max_igd <= cfg.fan_temp_min_igd) {
+        logf(0, "config: fan temp-max-igd <= temp-min-igd (%d <= %d) — koryguję na 41/91",
+             cfg.fan_temp_max_igd, cfg.fan_temp_min_igd);
+        cfg.fan_temp_min_igd = 41; cfg.fan_temp_max_igd = 91;
     }
     // v4.6: sanity compiler — fan-max clamp do [0,100] (100 = pełne wiatraki).
     if (cfg.compiler_fan_max < 0) cfg.compiler_fan_max = 0;
@@ -2203,16 +2232,18 @@ private:
     {
         auto st = power_.read();
         int igpu_freq = read_igpu_freq_mhz();
-        char buf[512];
+        char buf[640];
         std::snprintf(buf, sizeof buf,
             "{ \"topology\": \"%s\", \"dgpu_power\": \"%s\", \"dgpu_state\": \"%s\", "
             "\"target\": \"%s\", \"override\": \"%s\", \"last_action\": \"%s\", "
             "\"last_error\": \"%s\", \"nvram_prefs\": \"%s\", \"igpu_freq_mhz\": %d, "
-            "\"ts\": %lld }\n",
+            "\"fan_curve\": \"%s\", \"fan_tmin\": %d, \"fan_tmax\": %d, "
+            "\"fan_rpm1\": %d, \"fan_rpm2\": %d, \"ts\": %lld }\n",
             topo_.name(), st.on() ? "on" : "off", st.on() ? "on" : "off",
             target_name(), json_escape(override_).c_str(),
             json_escape(last_action_).c_str(),
             json_escape(last_error_).c_str(), nvram_prefs_.c_str(), igpu_freq,
+            g_fan_curve.c_str(), g_fan_tmin, g_fan_tmax, g_fan_rpm1, g_fan_rpm2,
             (long long)std::time(nullptr));
         write_file(SWITCH_STATUS_FILE, buf);
         write_file(SWITCH_DGPU_FILE, st.on() ? "on" : "off");
@@ -2242,7 +2273,7 @@ private:
 static void usage(const char* argv0)
 {
     std::printf(
-        "reclockd v5.0 — polityka profilowa (app-aware) + wentylatory + switchd + override + reload\n"
+        "reclockd v5.1 — polityka profilowa (app-aware) + wentylatory + switchd + override + reload\n"
         "Użycie: %s [opcje]\n"
         "  switchd (v5.0): dGPU power-state + render routing. W DIS = monitor\n"
         "    (zero zmian power). Sekcje [switch]/[dpower]/[dgpu-hard]/[dgpu-soft]\n"
@@ -2437,9 +2468,11 @@ int main(int argc, char** argv)
     if (g_cfg.fan_enable) {
         fan_ok = fan.init();
         if (fan_ok)
-            logf(1, "fan: applesmc OK — fan1=%d-%d RPM, fan2=%d-%d RPM, krzywa %d-%d°C",
+            logf(1, "fan: applesmc OK — fan1=%d-%d RPM, fan2=%d-%d RPM, "
+                    "krzywa %d-%d°C (dGPU ON) / %d-%d°C (tylko-iGPU)",
                  fan.fan1_min(), fan.fan1_max(), fan.fan2_min(), fan.fan2_max(),
-                 g_cfg.fan_temp_min, g_cfg.fan_temp_max);
+                 g_cfg.fan_temp_min, g_cfg.fan_temp_max,
+                 g_cfg.fan_temp_min_igd, g_cfg.fan_temp_max_igd);
         else
             logf(0, "UWAGA: applesmc niedostępny — sterowanie wentylatorami wyłączone (fail-safe)");
     } else {
@@ -2532,14 +2565,14 @@ int main(int argc, char** argv)
     int prev_fan_rpm1 = -1, prev_fan_rpm2 = -1;
     bool prev_fan_override = false;
 
-    logf(1, "start v5.0: interval=%dms poll=%dms, "
+    logf(1, "start v5.1: interval=%dms poll=%dms, "
             "default[cap=%s temp-up=%d temp-down=%d], "
             "preferred[cap=%s boost=%s busy-boost=%d%% boost-dwell=%dms "
             "temp-up=%d temp-down=%d], "
             "busy-up=%d%% busy-down=%d%%, temp-dwell=%dms idle-dwell=%dms, "
             "profile-dwell=%dms, hwmon=%s, hypr=%s, vblank=%d, "
             "gr-idle=%d‰, preferred-titles=%zu, low-power=%zu, "
-            "fan=%s temp[%d-%d] fan1[%d-%d] fan2[%d-%d], stan=%s, switch=%s",
+            "fan=%s temp[%d-%d] igd[%d-%d] fan1[%d-%d] fan2[%d-%d], stan=%s, switch=%s",
          g_cfg.interval_ms, g_cfg.poll_ms,
          state_hex(g_cfg.def.max_pstate), g_cfg.def.temp_up, g_cfg.def.temp_down,
          state_hex(g_cfg.preferred.max_pstate),
@@ -2554,6 +2587,7 @@ int main(int argc, char** argv)
          g_cfg.preferred_titles.size(), g_cfg.low_power_classes.size(),
          fan_ok ? "tak" : (g_cfg.fan_enable ? "BRAK" : "off"),
          g_cfg.fan_temp_min, g_cfg.fan_temp_max,
+         g_cfg.fan_temp_min_igd, g_cfg.fan_temp_max_igd,
          fan.fan1_min(), fan.fan1_max(), fan.fan2_min(), fan.fan2_max(),
          cur.c_str(), sw.mode_name());
 
@@ -2626,18 +2660,30 @@ int main(int argc, char** argv)
                 int ft = temp;
                 int ctemp = hw.read_cpu_temp();
                 if (ctemp > ft) ft = ctemp;
-                if (boost_on)
+                // v5.1: aktywna krzywa — standardowa (dGPU ON) albo igd (tylko-iGPU,
+                // dGPU OFF → temp=CPU). Wybór wg stanu power dGPU (nie topologii).
+                int tmin = g_cfg.fan_temp_min;
+                int tmax = g_cfg.fan_temp_max;
+                bool igd_curve = sw.enabled() && sw.dgpu_off();
+                if (igd_curve) { tmin = g_cfg.fan_temp_min_igd; tmax = g_cfg.fan_temp_max_igd; }
+                // v5.1: zapamiętaj stan dla statusu (aktualna krzywa + obroty).
+                if (boost_on) {
                     fan.set_boost(g_cfg.compiler_fan_max);
-                else
-                    fan.set(ft, g_cfg.fan_temp_min, g_cfg.fan_temp_max);
+                    g_fan_curve = "compiler";
+                } else {
+                    fan.set(ft, tmin, tmax);
+                    g_fan_curve = igd_curve ? "igd" : "dga";
+                    g_fan_tmin = tmin; g_fan_tmax = tmax;
+                }
                 int r1 = fan.last_rpm1(), r2 = fan.last_rpm2();
+                g_fan_rpm1 = r1; g_fan_rpm2 = r2;
                 if (r1 != prev_fan_rpm1 || r2 != prev_fan_rpm2) {
                     if (boost_on)
                         logf(1, "fan: KOMPILATOR wykryty (%s) -> fan1=%d fan2=%d RPM (boost %d%%)",
                              cname.c_str(), r1, r2, g_cfg.compiler_fan_max);
                     else
-                        logf(1, "fan: temp=%d°C -> fan1=%d fan2=%d RPM (krzywa %d-%d°C)",
-                             ft, r1, r2, g_cfg.fan_temp_min, g_cfg.fan_temp_max);
+                        logf(1, "fan: temp=%d°C -> fan1=%d fan2=%d RPM (krzywa %d-%d°C%s)",
+                             ft, r1, r2, tmin, tmax, igd_curve ? " igd" : "");
                     prev_fan_rpm1 = r1; prev_fan_rpm2 = r2;
                 } else if (g_cfg.verbosity >= 2) {
                     if (boost_on)
@@ -2647,6 +2693,9 @@ int main(int argc, char** argv)
                         logf(2, "fan: temp=%d°C fan1=%d fan2=%d RPM (bez zmian)",
                              ft, r1, r2);
                 }
+            } else {
+                // v5.1: override aktywny — daemon zamrożony, stan dla statusu.
+                g_fan_curve = "override";
             }
         }
 

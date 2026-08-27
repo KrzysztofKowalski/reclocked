@@ -183,6 +183,37 @@ igpu_status() {
   fi
 }
 
+fan_status() {
+  # v5.1: aktualna krzywa fan + obroty z daemona (/run/reclockd/status, JSON).
+  # Krzywa wybiera daemon (igd/dga/compiler/override) — tu tylko odczyt.
+  # Fallback bez daemona: obroty z sysfs applesmc (krzywa nieznana).
+  local curve tmin tmax r1 r2 note
+  echo "=== wentylatory ==="
+  if [ -r /run/reclockd/status ]; then
+    curve=$(sed -n 's/.*"fan_curve": *"\([^"]*\)".*/\1/p' /run/reclockd/status)
+    tmin=$(sed -n 's/.*"fan_tmin": *\([0-9]*\).*/\1/p' /run/reclockd/status)
+    tmax=$(sed -n 's/.*"fan_tmax": *\([0-9]*\).*/\1/p' /run/reclockd/status)
+    r1=$(sed -n 's/.*"fan_rpm1": *\([0-9]*\).*/\1/p' /run/reclockd/status)
+    r2=$(sed -n 's/.*"fan_rpm2": *\([0-9]*\).*/\1/p' /run/reclockd/status)
+    case "$curve" in
+      igd)      note="tylko-iGPU (dGPU OFF)" ;;
+      dga)      note="dGPU ON" ;;
+      compiler) note="boost kompilator" ;;
+      override) note="override (ręczne)" ;;
+      off)      note="fan wyłączony" ;;
+      *)        note="nieznana (${curve:-brak danych})" ;;
+    esac
+    printf '  %-22s %s\n' "krzywa:" "$curve ($tmin-$tmax°C) — $note"
+    printf '  %-22s fan1=%s RPM, fan2=%s RPM\n' "obroty:" "${r1:-n/d}" "${r2:-n/d}"
+  else
+    local f1 f2
+    f1=$(cat /sys/devices/platform/applesmc.768/fan1_input 2>/dev/null)
+    f2=$(cat /sys/devices/platform/applesmc.768/fan2_input 2>/dev/null)
+    printf '  %-22s %s\n' "krzywa:" "daemon nie działa — nieznana"
+    printf '  %-22s fan1=%s RPM, fan2=%s RPM (sysfs)\n' "obroty:" "${f1:-n/d}" "${f2:-n/d}"
+  fi
+}
+
 status() {
   echo "=== pstate (debugfs) ==="
   sudo cat "$PSTATE"
@@ -202,6 +233,7 @@ status() {
     fi
   fi
   igpu_status
+  fan_status
   echo "=== reclockd ==="
   daemon_status
   override_status
