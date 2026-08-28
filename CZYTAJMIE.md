@@ -225,8 +225,8 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
   switch skrócone: `dwell-out-ms` / `min-residence-ms` / `cooldown-ms` /
   `min-switch-gap-ms` = 1000 ms.
 - 🌡 **Per-profil zabezpieczenie termiczne**: downclock termiczny jest
-  **per-profil**, a nie globalny. `default` obniża taktowanie przy 65°C /
-  odzyskuje poniżej 58°C; `preferred` obniża przy 85°C / odzyskuje poniżej
+  **per-profil**, a nie globalny. `default` obniża taktowanie przy 77°C /
+  odzyskuje poniżej 52°C; `preferred` obniża przy 85°C / odzyskuje poniżej
   65°C. Obniżenie termiczne ma priorytet nad obciążeniem (i nad
   title-priority) w obu profilach.
 - 🌀 **Kontrola wentylatorów (applesmc)**: na laptopach Apple `reclockd`
@@ -607,8 +607,8 @@ wg **stanu power** dGPU (`sw.dgpu_off()`), nie topologii.
 | Klucz | Domyślnie | Znaczenie |
 |---|---|---|
 | `max-pstate` | `07` | Sufit pstate (indeks drabiny). Cap dla przejść UP. |
-| `temp-down` | `65` | °C — utrzymane powyżej → TERMAL w dół o jeden krok. |
-| `temp-up` | `58` | °C — utrzymane poniżej → UP dozwolone (jeśli obciążenie spełnione). |
+| `temp-down` | `77` | °C — utrzymane powyżej → TERMAL w dół o jeden krok. |
+| `temp-up` | `52` | °C — utrzymane poniżej → UP dozwolone (jeśli obciążenie spełnione). |
 
 ### `[profile preferred]` — aplikacje preferred (przeglądarka)
 

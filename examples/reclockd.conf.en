@@ -70,10 +70,10 @@ org.wezcel.Weasel
 
 [profile default]
 # Non-preferred app (terminal, editor): cap 07, hard throttle.
-# Thermal PER-PROFILE — conservative: above 65°C it slows down, recovery below 58°C.
+# Thermal PER-PROFILE — conservative: above 77°C it slows down, recovery below 52°C.
 max-pstate = 07
-temp-down = 65
-temp-up = 58
+temp-down = 77
+temp-up = 52
 
 [profile preferred]
 # Preferred app (browsers): safe ladder 07↔0a↔0e (cap 0e).
@@ -130,7 +130,7 @@ deep-idle-busy = 20
 # the global busy-up (80) in the dgpu-active context.
 busy-enter = 80
 busy-exit = 40
-# Thermal: true = per-profile (def 65/58, preferred 85/65 by focus); false =
+# Thermal: true = per-profile (def 77/52, preferred 85/65 by focus); false =
 # common temp-down/temp-up below. Entering 0e requires temp < temp-up.
 temp-per-profile = true
 # temp-down = 85

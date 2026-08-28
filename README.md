@@ -215,7 +215,7 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   is done by `[dgpu-active]`). Switch timers shortened: `dwell-out-ms` /
   `min-residence-ms` / `cooldown-ms` / `min-switch-gap-ms` = 1000 ms.
 - 🌡 **Per-profile thermal guard**: thermal downclock is **per-profile**, not
-  global. `default` throttles at 65°C / recovers below 58°C; `preferred`
+  global. `default` throttles at 77°C / recovers below 52°C; `preferred`
   throttles at 85°C / recovers below 65°C. Thermal down is prioritized over
   load (and over title-priority) in both profiles.
 - 🌀 **Fan control (applesmc)**: on Apple laptops, `reclockd` also drives the
@@ -583,8 +583,8 @@ topology.
 | Key | Default | Meaning |
 |---|---|---|
 | `max-pstate` | `07` | Ceiling pstate (ladder index). Cap for UP transitions. |
-| `temp-down` | `65` | °C — sustained above → TERMAL down one step. |
-| `temp-up` | `58` | °C — sustained below → UP allowed (if load met). |
+| `temp-down` | `77` | °C — sustained above → TERMAL down one step. |
+| `temp-up` | `52` | °C — sustained below → UP allowed (if load met). |
 
 ### `[profile preferred]` — preferred apps (browser)
 

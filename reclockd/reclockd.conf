@@ -70,10 +70,10 @@ org.wezcel.Weasel
 
 [profile default]
 # Apka non-preferred (terminal, edytor): cap 07, twardy throttle.
-# Thermal PER-PROFIL — konserwatywny: powyżej 65°C zwalnia, odzysk poniżej 58°C.
+# Thermal PER-PROFIL — konserwatywny: powyżej 77°C zwalnia, odzysk poniżej 52°C.
 max-pstate = 07
-temp-down = 65
-temp-up = 58
+temp-down = 77
+temp-up = 52
 
 [profile preferred]
 # Apka preferred (przeglądarki): bezpieczna drabinka 07↔0a↔0e (cap 0e).
@@ -130,7 +130,7 @@ deep-idle-busy = 20
 # nadpisuje globalny busy-up (80) w kontekście dGPU-active.
 busy-enter = 80
 busy-exit = 40
-# Termalne: true = per-profil (def 65/58, preferred 85/65 wg focusa); false =
+# Termalne: true = per-profil (def 77/52, preferred 85/65 wg focusa); false =
 # wspólne temp-down/temp-up poniżej. Wejście 0e wymaga temp < temp-up.
 temp-per-profile = true
 # temp-down = 85
