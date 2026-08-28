@@ -390,6 +390,10 @@ struct Config {
         // jest "idle" → demote do iGPU (power-off) po dwell-out. Konfigurowalne
         // w [switch] (title-idle-busy), reload przez SIGHUP.
         int  title_idle_busy = 33;
+        // v5.6: po demote klasy tytułowej (Discord/YouTube) trzymaj dGPU OFF przez
+        // ten czas przed ponowną promocją — zapobiega churnowi (grający YT na iGPU
+        // nie re-promuje co 3-4 s). Konfigurowalne w [switch] (title-idle-hold-ms).
+        int  title_idle_hold_ms = 30000;
         // v5.6: % busy poniżej którego klasa [dgpu-idle] (np. mpv) jest "idle"
         // → demote do iGPU (power-off) po dwell-out. Konfigurowalne w [switch]
         // (class-idle-busy), reload przez SIGHUP.
@@ -687,6 +691,7 @@ static bool load_config(const std::string& path, Config& cfg)
             else if (keys == "pstate-settle-ms")  cfg.sw.pstate_settle_ms  = parse_int(vals);
             else if (keys == "pstate-write-timeout-ms") cfg.sw.pstate_write_timeout_ms = parse_int(vals);
             else if (keys == "title-idle-busy")   cfg.sw.title_idle_busy   = parse_int(vals);
+            else if (keys == "title-idle-hold-ms") cfg.sw.title_idle_hold_ms = parse_int(vals);
             else if (keys == "class-idle-busy")  cfg.sw.class_idle_busy   = parse_int(vals);
             continue;
         }
@@ -811,6 +816,8 @@ static bool load_config(const std::string& path, Config& cfg)
     // v5.6: sanity title-idle-busy — % busy, clamp [0,100]; błędna wartość
     // (ujemna/absurdalna) → fallback 33.
     if (cfg.sw.title_idle_busy < 0 || cfg.sw.title_idle_busy > 100) cfg.sw.title_idle_busy = 33;
+    // v5.6: sanity title-idle-hold-ms — min 1000 ms (1 s), błędna wartość → 30000.
+    if (cfg.sw.title_idle_hold_ms < 1000) cfg.sw.title_idle_hold_ms = 30000;
     // v5.6: sanity class-idle-busy — % busy, clamp [0,100]; błędna wartość → 33.
     if (cfg.sw.class_idle_busy < 0 || cfg.sw.class_idle_busy > 100) cfg.sw.class_idle_busy = 33;
     // v5.4: sanity [dgpu-active]. Stany muszą być znane (07/0a/0e/0f) i
@@ -2015,8 +2022,9 @@ public:
         // (anti-flapping). dwell_out_ zerowany póki aktywna → demote nie tyka.
         if (title_promo && !idle_title) {
             dwell_out_ = 0;
+            // v5.6: hold-off po demote — YT na iGPU bez churnu
             if (target_ != DGPU && thermal_ok &&
-                since(last_demote_) >= cfg.cooldown_ms) {
+                since(last_demote_) >= cfg.title_idle_hold_ms) {
                 last_promote_ = now;
                 target_ = DGPU;
             }

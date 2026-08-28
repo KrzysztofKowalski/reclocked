@@ -115,7 +115,7 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   can wedge the compositor (Kepler rewrites framebuffer timings mid-frame →
   render-target PROP traps). vblank sync only protects scanout, not the GR
   engine. DOWN transitions are therefore **deferred** until the instantaneous
-  busy falls below `gr-idle-promille` (default 300 ‰ = 30%). UP transitions
+  busy falls below `gr-idle-promille` (default 500 ‰ = 50%). UP transitions
   are not gated (a rising clock is safer mid-render).
 - 🏷 **Title-priority (Discord / YouTube)**: browser tabs like Discord and
   YouTube have no window class of their own — their identity shows up in the
@@ -208,8 +208,9 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   longer forces the dGPU by class. Instead, Discord/YouTube tabs promote by window
   **title** (`[preferred-titles]`, case-insensitive); every other tab is neutral
   (iGPU). Title promotion is **not a latch**: a promoted card whose busy drops
-  below `title-idle-busy` (default 33 %, `[switch]`, SIGHUP-reloadable) is
-  demoted to the iGPU (power-off) after `dwell-out-ms`. Focusing anything that is
+  below `title-idle-busy` (default 70 %, `[switch]`, SIGHUP-reloadable) is
+  demoted to the iGPU (power-off) after `dwell-out-ms` (30 s hold-off before
+  re-promotion). Focusing anything that is
   not Discord/YouTube demotes after 1 s regardless of busy (the downclock to `07`
   is done by `[dgpu-active]`). Switch timers shortened: `dwell-out-ms` /
   `min-residence-ms` / `cooldown-ms` / `min-switch-gap-ms` = 1000 ms.
@@ -514,7 +515,8 @@ is out of scope for the gmux.
 | `temp-gate` | `82` | °C — don't promote when the dGPU is hotter |
 | `busy-enter` | `80` | busy% for soft promotion |
 | `busy-exit` | `40` | busy% for demote |
-| `title-idle-busy` | `33` | v5.6: busy% below which a title-promoted Discord/YouTube card is 'idle' → demote to iGPU (power-off) after `dwell-out-ms`; SIGHUP-reloadable |
+| `title-idle-busy` | `70` | v5.6: busy% below which a title-promoted Discord/YouTube card is 'idle' → demote to iGPU (power-off) after `dwell-out-ms`; SIGHUP-reloadable |
+| `title-idle-hold-ms` | `30000` | v5.6: after demoting a Discord/YouTube card, keep the dGPU OFF for this long before re-promoting — prevents churn (playing YT on iGPU does not re-promote every 3-4 s) |
 | `class-idle-busy` | `33` | v5.6: busy% below which a `[dgpu-idle]` class (e.g. `mpv`) is 'idle' → demote to iGPU (power-off) after `dwell-out-ms`; SIGHUP-reloadable |
 | `pstate-settle-ms` | `10000` | don't write pstate after power-on — GPU clock settle after D3hot→D0 (the first clock change can hang the nouveau workqueue) |
 | `pstate-write-timeout-ms` | `2000` | pstate write runs in a separate thread; on timeout the daemon stays alive and pauses pstate writes |
@@ -599,14 +601,14 @@ topology.
 | `interval-ms` | `200` | Sampling period. |
 | `poll-ms` | `1000` | `hyprctl` polling period (≥ `interval-ms`). |
 | `busy-up` | `80` | % busy > → UP one step (ladder). |
-| `busy-down` | `40` | % busy ≤ → IDLE dwell counts. Hysteresis band 80/40 = 40 pp. |
+| `busy-down` | `60` | % busy ≤ → IDLE dwell counts. Hysteresis band 80/60 = 20 pp. |
 | `temp-dwell-ms` | `5000` | Dwell for thermal conditions. |
-| `idle-dwell-ms` | `5000` | Dwell for idle downclock. |
+| `idle-dwell-ms` | `1000` | Dwell for idle downclock. |
 | `profile-dwell-ms` | `2000` | Rate-limit on profile switches (alt-tab flap guard). |
 | `win-ms` | `1000` | Sliding window for busy averaging. |
 | `exit-state` | `0a` | pstate written on SIGTERM exit. |
 | `vblank-sync` | `true` | Align pstate writes to vblank. |
-| `gr-idle-promille` | `300` | ‰ instantaneous busy below which DOWN transitions are allowed (GR-idle gate). 300 = 30 %. `0` paralyzes DOWN; `1000` disables the gate. |
+| `gr-idle-promille` | `500` | ‰ instantaneous busy below which DOWN transitions are allowed (GR-idle gate). 500 = 50 %. `0` paralyzes DOWN; `1000` disables the gate. |
 
 ### `[dgpu-active]` section — 3-step policy for the whole dGPU (v5.4)
 

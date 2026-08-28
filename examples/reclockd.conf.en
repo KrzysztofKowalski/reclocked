@@ -84,21 +84,21 @@ boost-pstate = -1
 busy-boost = 85
 boost-dwell-ms = 5000
 
-# General parameters (override built-in defaults). Load hysteresis 80/40 (40 pp).
+# General parameters (override built-in defaults). Load hysteresis 80/60 (20 pp).
 [global]
 interval-ms = 200
 poll-ms = 1000
 busy-up = 80
-busy-down = 40
+busy-down = 60
 temp-dwell-ms = 5000
-idle-dwell-ms = 5000
+idle-dwell-ms = 1000
 profile-dwell-ms = 2000
 win-ms = 1000
 exit-state = 0a
 # v4.1: instantaneous busy threshold (‰) below which DOWN transitions are allowed
-# (GR-idle gate). 300 = 30%. In-flight memory reclock while GR is mid-render wedges
+# (GR-idle gate). 500 = 50%. In-flight memory reclock while GR is mid-render wedges
 # the engine — the gate defers DOWN until busy hits a valley. UP-LOAD/BOOST-UP not gated.
-gr-idle-promille = 300
+gr-idle-promille = 500
 
 # v5.6: [dgpu-active] — THREE-STEP pstate policy for the WHOLE dGPU when ON.
 # (report 79 + user decisions 2026-08-28). Replaces profile-based state selection:
@@ -202,10 +202,12 @@ min-switch-gap-ms = 1000
 temp-gate = 82
 busy-enter = 80
 busy-exit = 40
-# v5.6: busy% below which a Discord/YouTube card (title promotion) is 'idle'
-# → demote to iGPU (power-off) after dwell-out. Easy to change + reload (SIGHUP).
-# Playing YT ~25-36% busy stays on the dGPU; real idle drops the dGPU.
-title-idle-busy = 33
+# v5.6: > 70% busy = keep the dGPU state for video; below → declock to 07 / iGPU.
+# Easy to change + reload (SIGHUP).
+title-idle-busy = 70
+# v5.6: after demoting a Discord/YouTube card, keep the dGPU OFF for this long
+# before re-promoting — prevents churn (playing YT on iGPU does not re-promote every 3-4 s).
+title-idle-hold-ms = 30000
 # v5.6: busy% below which a [dgpu-idle] class (e.g. mpv) is 'idle' → demote
 # to iGPU (power-off) after dwell-out. Easy to change + reload (SIGHUP).
 class-idle-busy = 33
