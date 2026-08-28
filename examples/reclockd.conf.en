@@ -206,6 +206,9 @@ busy-exit = 40
 # → demote to iGPU (power-off) after dwell-out. Easy to change + reload (SIGHUP).
 # Playing YT ~25-36% busy stays on the dGPU; real idle drops the dGPU.
 title-idle-busy = 33
+# v5.6: busy% below which a [dgpu-idle] class (e.g. mpv) is 'idle' → demote
+# to iGPU (power-off) after dwell-out. Easy to change + reload (SIGHUP).
+class-idle-busy = 33
 pstate-settle-ms = 10000
 pstate-write-timeout-ms = 2000
 
@@ -228,10 +231,14 @@ wait-ready-timeout-ms = 10000
 game
 blender
 steam
-mpv
 
 # Window classes with soft promotion (busy-gated) — empty by default
 [dgpu-soft]
+
+# Window classes with idle-demote: they promote to the dGPU like hard classes, but
+# busy < class-idle-busy → demote to iGPU (e.g. mpv — video on dGPU, pause/idle on iGPU)
+[dgpu-idle]
+mpv
 
 # Window classes always on iGPU (demotion)
 [igpu]

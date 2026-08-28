@@ -515,6 +515,7 @@ is out of scope for the gmux.
 | `busy-enter` | `80` | busy% for soft promotion |
 | `busy-exit` | `40` | busy% for demote |
 | `title-idle-busy` | `33` | v5.6: busy% below which a title-promoted Discord/YouTube card is 'idle' → demote to iGPU (power-off) after `dwell-out-ms`; SIGHUP-reloadable |
+| `class-idle-busy` | `33` | v5.6: busy% below which a `[dgpu-idle]` class (e.g. `mpv`) is 'idle' → demote to iGPU (power-off) after `dwell-out-ms`; SIGHUP-reloadable |
 | `pstate-settle-ms` | `10000` | don't write pstate after power-on — GPU clock settle after D3hot→D0 (the first clock change can hang the nouveau workqueue) |
 | `pstate-write-timeout-ms` | `2000` | pstate write runs in a separate thread; on timeout the daemon stays alive and pauses pstate writes |
 
@@ -530,9 +531,10 @@ is out of scope for the gmux.
 What promotes / demotes:
 
 - `[dgpu-hard]` — window classes that force the dGPU on (hard promotion, no
-  busy gate): `game`, `blender`, `steam`, `mpv` (v5.6: browsers **removed** — a
+  busy gate): `game`, `blender`, `steam` (v5.6: browsers **removed** — a
   focused browser tab no longer forces the dGPU by class; Discord/YouTube tabs
   promote by window title via `[preferred-titles]`, other tabs are neutral).
+- `[dgpu-idle]` — classes that promote to the dGPU like hard classes, but demote to the iGPU when busy < `class-idle-busy` (default 33%): `mpv` (video on dGPU, pause/idle on iGPU).
 - `[dgpu-soft]` — classes with busy-gated soft promotion (empty by default).
 - `[igpu]` — classes always kept on the iGPU (demotion): `foot`, `kitty`,
   `alacritty`.

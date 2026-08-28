@@ -390,11 +390,16 @@ struct Config {
         // jest "idle" → demote do iGPU (power-off) po dwell-out. Konfigurowalne
         // w [switch] (title-idle-busy), reload przez SIGHUP.
         int  title_idle_busy = 33;
+        // v5.6: % busy poniżej którego klasa [dgpu-idle] (np. mpv) jest "idle"
+        // → demote do iGPU (power-off) po dwell-out. Konfigurowalne w [switch]
+        // (class-idle-busy), reload przez SIGHUP.
+        int  class_idle_busy = 33;
         // v5.6: tytuły Discord/YouTube (kopiowane z [preferred-titles] w parserze)
         // — promocja tytułowa karty w przeglądarce, NIE zapinka (idle-release).
         std::set<std::string> preferred_titles;
         std::set<std::string> dgpu_hard;  // [dgpu-hard] klasy — twarda promocja
         std::set<std::string> dgpu_soft;  // [dgpu-soft] klasy — miękka (busy-gated)
+        std::set<std::string> dgpu_idle;  // [dgpu-idle] klasy — twarda promocja + idle-demote
         std::set<std::string> igpu;       // [igpu] klasy — zawsze iGPU (democja)
         std::set<std::string> dgpu_procs; // [dgpu-procs] procesy — CUDA/DRI_PRIME
     } sw;
@@ -682,6 +687,7 @@ static bool load_config(const std::string& path, Config& cfg)
             else if (keys == "pstate-settle-ms")  cfg.sw.pstate_settle_ms  = parse_int(vals);
             else if (keys == "pstate-write-timeout-ms") cfg.sw.pstate_write_timeout_ms = parse_int(vals);
             else if (keys == "title-idle-busy")   cfg.sw.title_idle_busy   = parse_int(vals);
+            else if (keys == "class-idle-busy")  cfg.sw.class_idle_busy   = parse_int(vals);
             continue;
         }
         // v5.0: sekcja [dpower] — backend power dGPU.
@@ -699,6 +705,7 @@ static bool load_config(const std::string& path, Config& cfg)
         // v5.0: sekcje listowe switchd — bare keys (klasy/procesy).
         if (section == "dgpu-hard")  { cfg.sw.dgpu_hard.insert(t);  continue; }
         if (section == "dgpu-soft")  { cfg.sw.dgpu_soft.insert(t);  continue; }
+        if (section == "dgpu-idle")  { cfg.sw.dgpu_idle.insert(t);  continue; }
         if (section == "igpu")       { cfg.sw.igpu.insert(t);       continue; }
         if (section == "dgpu-procs") { cfg.sw.dgpu_procs.insert(t); continue; }
         // v5.4: [video-classes] — klasy odtwarzaczy kwalifikujące video (mpv/vlc).
@@ -804,6 +811,8 @@ static bool load_config(const std::string& path, Config& cfg)
     // v5.6: sanity title-idle-busy — % busy, clamp [0,100]; błędna wartość
     // (ujemna/absurdalna) → fallback 33.
     if (cfg.sw.title_idle_busy < 0 || cfg.sw.title_idle_busy > 100) cfg.sw.title_idle_busy = 33;
+    // v5.6: sanity class-idle-busy — % busy, clamp [0,100]; błędna wartość → 33.
+    if (cfg.sw.class_idle_busy < 0 || cfg.sw.class_idle_busy > 100) cfg.sw.class_idle_busy = 33;
     // v5.4: sanity [dgpu-active]. Stany muszą być znane (07/0a/0e/0f) i
     // baseline <= max. Progi busy clamp do [0,100]. activity-source: tylko
     // "evdev" daje sygnał inputu; "none"/"cursorpos" → brak (idle po dwell).
@@ -1941,6 +1950,11 @@ public:
                 if (cfg.dgpu_procs.count(c)) { hard = true; break; }
         }
 
+        // v5.6: [dgpu-idle] — klasy z idle-demote (np. mpv): promują do dGPU jak
+        // twarde, ALE busy < class_idle_busy → demote do iGPU (symetrycznie z
+        // promocją tytułową Discord/YouTube).
+        bool idle_class = !in.focused_class.empty() && cfg.dgpu_idle.count(in.focused_class);
+
         // v5.6: promocja tytułowa — karta Discord/YouTube w przeglądarce → dGPU,
         // ALE NIE jest zapinką: busy < title_idle_busy → demote do iGPU.
         bool title_promo = false;
@@ -1975,16 +1989,24 @@ public:
         // ale nie demotuj pod aktywnym wymaganiem — inaczej flapping).
         if (hard) {
             dwell_out_ = 0;   // promocja kasuje sygnał demote
-            if (thermal_ok) {
-                if (target_ != DGPU && since(last_demote_) < cfg.cooldown_ms) {
-                    // cooldown — czekaj
-                } else {
-                    if (target_ != DGPU) last_promote_ = now;
-                    target_ = DGPU;
+            // v5.6: [dgpu-idle] — idle-demote (np. mpv): gdy busy_known i busy <
+            // class_idle_busy → NIE trzymaj dGPU (fall through do wspólnej ścieżki
+            // demote). Gdy dGPU OFF (busy_known=false) → promuj jak twarda
+            // (busy nieznane ≠ idle — to samo zabezpieczenie co title_promo).
+            bool idle_now = idle_class && busy_known && (int)in.busy < cfg.class_idle_busy * 10;
+            if (!idle_now) {
+                if (thermal_ok) {
+                    if (target_ != DGPU && since(last_demote_) < cfg.cooldown_ms) {
+                        // cooldown — czekaj
+                    } else {
+                        if (target_ != DGPU) last_promote_ = now;
+                        target_ = DGPU;
+                    }
                 }
+                // !thermal_ok: nie promuj; trzymaj dGPU jeśli już włączony.
+                return target_;
             }
-            // !thermal_ok: nie promuj; trzymaj dGPU jeśli już włączony.
-            return target_;
+            // idle_now: fall through — demote przez wspólną ścieżkę poniżej.
         }
 
         // v5.6: promocja tytułowa — aktywna karta Discord/YT → dGPU (cooldown-

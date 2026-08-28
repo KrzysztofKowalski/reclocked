@@ -534,6 +534,7 @@ Sekcja `[switch]`:
 | `busy-enter` | `80` | busy% dla miękkiej promocji |
 | `busy-exit` | `40` | busy% dla demote |
 | `title-idle-busy` | `33` | v5.6: busy% poniżej którego karta Discord/YT (promocja tytułowa) jest 'idle' → demote do iGPU (power-off) po `dwell-out-ms`; reload przez SIGHUP |
+| `class-idle-busy` | `33` | v5.6: busy% poniżej którego klasa `[dgpu-idle]` (np. `mpv`) jest 'idle' → demote do iGPU (power-off) po `dwell-out-ms`; reload przez SIGHUP |
 | `pstate-settle-ms` | `10000` | nie pisz pstate po power-on — settle zegara GPU po D3hot→D0 (pierwsza zmiana clocka potrafi zawiesić workqueue nouveau) |
 | `pstate-write-timeout-ms` | `2000` | zapis pstate w osobnym wątku; po timeoutcie daemon żyje dalej i wstrzymuje zapisy pstate |
 
@@ -549,10 +550,13 @@ Sekcja `[switch]`:
 Co promuje / demote'uje:
 
 - `[dgpu-hard]` — klasy okien wymuszające dGPU (twarda promocja, bez busy
-  gate): `game`, `blender`, `steam`, `mpv` (v5.6: przeglądarki **usunięte** — focus
+  gate): `game`, `blender`, `steam` (v5.6: przeglądarki **usunięte** — focus
   karty w przeglądarce nie wymusza już dGPU po klasie; karty Discord/YouTube
   promują po tytule okna przez `[preferred-titles]`, pozostałe karty są
   neutralne).
+- `[dgpu-idle]` — klasy, które promują do dGPU jak twarde, ale demote'ują do
+  iGPU, gdy busy < `class-idle-busy` (default 33%): `mpv` (wideo na dGPU,
+  pauza/idle na iGPU).
 - `[dgpu-soft]` — klasy z miękką promocją busy-gated (na start puste).
 - `[igpu]` — klasy zawsze na iGPU (democja): `foot`, `kitty`, `alacritty`.
 - `[dgpu-procs]` — nazwy procesów (skan `/proc/*/comm`) wymagające dGPU:
