@@ -633,7 +633,7 @@ v5.1). Przy dGPU ON działa standardowa krzywa `temp-min`/`temp-mid`/`temp-max`
 |---|---|---|
 | `enable` | `true` | Włącz logikę wentylatorów wg temperatury obudowy; `false` → legacy 1:1 (escape hatch). |
 | `keys` | `Ta0P, TaSP, Th1H, Th2H, Ts0S, Ts1S, TM0P, TP0P` | czujniki applesmc, mapowane po `tempN_label`; średnia arytmetyczna (m°C; wartości ujemne/niepodłączone pomijane — niepodłączone -127000, jałowy dummy TCTD). Klawiatura nie ma własnego czujnika — TC0E/TC0F (rama płyty) poza zestawem (duplikat krzywej CPU). |
-| `case-min` | `30` | °C, przy/poniżej którego krzywa case wnosi 0%. |
+| `case-min` | `40` | °C, przy/poniżej którego krzywa case wnosi 0% (minimum fizyczne — case nie zejdzie niżej z propagacją termalną). |
 | `case-max` | `60` | °C, przy/powyżej którego krzywa case wymaga 100% RPM. |
 | `case-dwell-ms` | `5000` | case musi być powyżej `case-min` tak długo, zanim wejdzie SOAK. |
 | `hold-ms` | `90000` | minimalny czas trzymania podwyższonego floor w SOAK. |

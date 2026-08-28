@@ -608,7 +608,7 @@ topology.
 |---|---|---|
 | `enable` | `true` | Enable the case-thermal fan logic; `false` → legacy 1:1 fan algorithm (escape hatch). |
 | `keys` | `Ta0P, TaSP, Th1H, Th2H, Ts0S, Ts1S, TM0P, TP0P` | applesmc sensors, matched by `tempN_label`; arithmetic mean of the values (m°C; negative/unplugged readings skipped — unplugged -127000, idle dummy TCTD). The keyboard has no sensor of its own — TC0E/TC0F (board frame) is outside the set (duplicates the CPU curve). |
-| `case-min` | `30` | °C at/below which the case curve contributes 0%. |
+| `case-min` | `40` | °C at/below which the case curve contributes 0% (physical minimum — case can't go lower with thermal propagation). |
 | `case-max` | `60` | °C at/above which the case curve demands 100% fan RPM. |
 | `case-dwell-ms` | `5000` | Case must stay above `case-min` this long before SOAK engages. |
 | `hold-ms` | `90000` | Minimum time SOAK holds the elevated floor. |

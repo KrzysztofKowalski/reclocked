@@ -438,7 +438,7 @@ struct Config {
     struct FanCaseCfg {
         bool enable = false;
         std::vector<std::string> keys;  // klucze SMC (label) do średniej
-        int case_min = 30;              // °C: case ≤ → 0% zakresu RPM (nic nie wymusza)
+        int case_min = 40;              // °C: case ≤ → 0% zakresu RPM (nic nie wymusza)
         int case_max = 60;              // °C: case ≥ → 100% zakresu RPM
         int dwell_in_ms = 5000;         // case > case-min przez tyle → SOAK
         int hold_ms = 90000;            // górny limit trwania SOAK

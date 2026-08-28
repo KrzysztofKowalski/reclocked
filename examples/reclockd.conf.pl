@@ -185,7 +185,7 @@ temp-max-igd = 90
 [fan-case]
 enable = true
 keys = Ta0P, TaSP, Th1H, Th2H, Ts0S, Ts1S, TM0P, TP0P
-case-min = 30
+case-min = 40
 case-max = 60
 case-dwell-ms = 5000
 hold-ms = 90000
