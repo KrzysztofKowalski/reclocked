@@ -194,6 +194,19 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
   55-80-90 °C (3-punktowa). `pstate.sh status` ma dodatkową
   sekcję `=== wentylatory ===` — aktywna krzywa + zakres + obroty z
   `/run/reclockd/status` (fallback do sysfs applesmc, gdy daemon nie działa).
+- 🌬 **Termika obudowy + SOAK (v5.10/v5.11)**: wentylatory wg **średniej
+  temperatury obudowy** (`[fan-case]`, raport 97), nie tylko max(CPU, dGPU) —
+  czujniki applesmc mapowane po etykietach (`keys`; klawiatura nie ma własnego
+  czujnika — TC0E/TC0F poza zestawem jako duplikat krzywej CPU), krzywa
+  liniowa `case-min`→`case-max`, i stan **SOAK**: case > `case-min` przez
+  `case-dwell-ms` → floor wiatraków trzymany przez `hold-ms` i zwalniany
+  dopiero po spadku case poniżej `case-min−margin` przez `exit-dwell-ms`
+  (termostat — bez twardego wyjścia, bez klapania na progu). v5.11: w SOAK
+  floor **eskaluje** z aktualnym case — target = max(floor wejścia,
+  krzywa(aktualny case)); floor z wejścia to tylko dolna granica.
+  `ramp-rpm-s` ogranicza tempo zmian RPM (boost kompilatora i fan-override
+  nadrzędne — pomijają ramp). `reclockctl status` pokazuje
+  `fan-case: <°C> (stan: soak)`.
 - 🔀 **Przeglądarki wymuszają dGPU (v5.2)**: klasy przeglądarek (`chromium`,
   `firefox`, `google-chrome`, `brave`) dodane do `[dgpu-hard]` — focus
   przeglądarki promuje dGPU (power-on) z profilem `[preferred]` (pstate
@@ -542,7 +555,7 @@ Sekcja `[switch]`:
 | `title-idle-hold-ms` | `30000` | v5.6: po demote karty Discord/YT trzymaj dGPU OFF przez ten czas przed ponowną promocją. v5.7: re-promocja tytułowa tylko po zmianie tytułu/focusu — karta YT z busy < progu zostaje na iGPU na całe wideo (zero churnu); nowe wideo → re-promocja |
 | `class-idle-busy` | `33` | v5.6: busy% poniżej którego klasa `[dgpu-idle]` (np. `mpv`) jest 'idle' → demote do iGPU (power-off) po `dwell-out-ms`; reload przez SIGHUP. v5.7: + `cpu-temp-gate` — gorący CPU + zapas termalny dGPU → trzymaj dGPU mimo niskiego busy; pauza (busy < 5%) → demote zawsze |
 | `cpu-temp-gate` | `70` | v5.7: próg temp CPU (°C) dla demote klasy `[dgpu-idle]` (mpv). CPU gorętszy niż próg (robi coś innego, np. kompilacja) + dGPU poniżej `temp-gate` (zapas termalny) → mpv zostaje na dGPU. busy < 5% (pauza) → demote zawsze. `0` = wyłączony; reload przez SIGHUP |
-| `cpu-temp-promote` | `80` | v5.9: próg temp CPU (°C) dla termicznego odciążania kart tytułowych (YT/Discord): CPU ≥ próg → re-promocja do dGPU bez zmiany tytułu/focusu + demote zablokowany (dGPU poniżej `temp-gate`, busy ≥ 5%) — dGPU przejmuje render, CPU się chłodzi. `0` = wyłączony; reload przez SIGHUP; guard: escape busy<5% dopiero po pstate-settle-ms od promocji |
+| `cpu-temp-promote` | `70` | v5.9: próg temp CPU (°C) dla termicznego odciążania kart tytułowych (YT/Discord): CPU ≥ próg → re-promocja do dGPU bez zmiany tytułu/focusu + demote zablokowany (dGPU poniżej `temp-gate`, busy ≥ 5%) — dGPU przejmuje render, CPU się chłodzi. `0` = wyłączony; reload przez SIGHUP; guard: escape busy<5% dopiero po pstate-settle-ms od promocji; przez pstate-settle-ms po power-onie temp dGPU nie bramkuje (odczyt nieświeży — dGPU z OFF ma zapas z definicji) |
 | `pstate-settle-ms` | `10000` | nie pisz pstate po power-on — settle zegara GPU po D3hot→D0 (pierwsza zmiana clocka potrafi zawiesić workqueue nouveau) |
 | `pstate-write-timeout-ms` | `2000` | zapis pstate w osobnym wątku; po timeoutcie daemon żyje dalej i wstrzymuje zapisy pstate |
 
@@ -613,6 +626,26 @@ dGPU, stąd osobna, cichsza krzywa igd (domyślnie 33-80-90 °C, 3-punktowa,
 v5.1). Przy dGPU ON działa standardowa krzywa `temp-min`/`temp-mid`/`temp-max`
 (55-80-90 °C, 3-punktowa). Wybór krzywej wg **stanu power** dGPU
 (`sw.dgpu_off()`), nie topologii.
+
+### Sekcja `[fan-case]` — termika obudowy + SOAK (v5.10/v5.11)
+
+| Klucz | Domyślnie | Znaczenie |
+|---|---|---|
+| `enable` | `true` | Włącz logikę wentylatorów wg temperatury obudowy; `false` → legacy 1:1 (escape hatch). |
+| `keys` | `Ta0P, TaSP, Th1H, Th2H, Ts0S, Ts1S, TM0P, TP0P` | czujniki applesmc, mapowane po `tempN_label`; średnia arytmetyczna (m°C; wartości ujemne/niepodłączone pomijane — niepodłączone -127000, jałowy dummy TCTD). Klawiatura nie ma własnego czujnika — TC0E/TC0F (rama płyty) poza zestawem (duplikat krzywej CPU). |
+| `case-min` | `30` | °C, przy/poniżej którego krzywa case wnosi 0%. |
+| `case-max` | `60` | °C, przy/powyżej którego krzywa case wymaga 100% RPM. |
+| `case-dwell-ms` | `5000` | case musi być powyżej `case-min` tak długo, zanim wejdzie SOAK. |
+| `hold-ms` | `90000` | minimalny czas trzymania podwyższonego floor w SOAK. |
+| `exit-dwell-ms` | `10000` | case musi być poniżej `case-min−margin` tak długo (po `hold-ms`), zanim SOAK wyjdzie. |
+| `margin` | `3` | °C histerezy poniżej `case-min` dla wyjścia z SOAK. |
+| `hold-floor` | `curve` | floor SOAK z wejścia (v5.11: target = max(floor wejścia, krzywa(aktualny case)) — wiatraki eskalują, póki obudowa gorąca, nie spadają poniżej floor z wejścia, aż ostygnie). |
+| `ramp-rpm-s` | `150` | maks. zmiana RPM na 1 s (boost kompilatora i fan-override pomijają ramp — safety). |
+
+Krzywa case jest brana `max()`em z krzywą CPU — CPU przy 90 °C dostaje max RPM
+niezależnie od case. Status: `fan_case_avg` (°C, -1 = brak ważnych czujników)
+i `fan_case_state` (`normal`/`soak`) w `/run/reclockd/status`, pokazywane też
+przez `reclockctl status`.
 
 ### `[profile default]` — aplikacje nie-preferred (terminal/edytor)
 

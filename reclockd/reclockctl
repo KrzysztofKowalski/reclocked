@@ -113,6 +113,14 @@ case "$CMD" in
         "$(cat $fb/fan${n}_max 2>/dev/null || echo '?')"
     done
     [ -f /run/reclockd/fan-override ] && echo "fan-override: AKTYWNY (auto zamrożone)" || echo "fan-override: brak (auto)"
+    # v5.10: termika obudowy ([fan-case]) — średnia °C + stan SOAK (z JSON statusu;
+    # brak pól przy starym daemonie → pomiń)
+    f="/run/reclockd/status"
+    ca="$(json_get "$f" fan_case_avg)"
+    cs="$(json_get "$f" fan_case_state)"
+    if [ -n "$ca" ]; then
+      printf "fan-case:   %s °C (stan: %s)\n" "$ca" "$cs"
+    fi
     ;;
   switch-status)
     f="/run/reclockd/status"

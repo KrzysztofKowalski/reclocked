@@ -163,6 +163,38 @@ temp-mid-igd = 80
 fan-mid-igd = 70
 temp-max-igd = 90
 
+# v5.10: CASE THERMAL ([fan-case], report 97, full variant B a+b+c) — fans follow
+# the AVERAGE case temperature, not just max(CPU, dGPU).
+#   Measure — applesmc by label (tempN_label → SMC key); arithmetic mean of the
+#             values in `keys` (m°C; negative values skipped — unplugged -127000,
+#             idle dummy TCTD). The keyboard has NO sensor of its own — TC0E/TC0F
+#             (board frame under the keyboard) is OUTSIDE the set (duplicate of
+#             the CPU curve, report 97 §2.3).
+#   Curve    — linear: case ≤ case-min → 0% (min RPM, no forcing), case ≥ case-max
+#             → 100% RPM (fan max from [fan]); max() with the CPU curve (CPU at
+#             90°C gets max RPM regardless of case).
+#   SOAK/HOLD — case > case-min for case-dwell-ms → SOAK for hold-ms with floor =
+#             curve at case entry (never drops below); exit only after hold
+#             elapsed AND case < case-min−margin for exit-dwell-ms. Implements
+#             "spin for a while and hold until the case cools down".
+#   v5.11: in SOAK the floor ESCALATES with the current case — target =
+#             max(entry floor, curve(current case)); the entry floor is only the
+#             lower bound (ratchet down).
+#   RAMP    — max RPM change per second (ramp-rpm-s); compiler boost and
+#             fan-override are supreme and bypass the ramp (safety).
+#   enable=0 — legacy 1:1 fan algorithm (escape hatch).
+[fan-case]
+enable = true
+keys = Ta0P, TaSP, Th1H, Th2H, Ts0S, Ts1S, TM0P, TP0P
+case-min = 30
+case-max = 60
+case-dwell-ms = 5000
+hold-ms = 90000
+exit-dwell-ms = 10000
+margin = 3
+hold-floor = curve
+ramp-rpm-s = 150
+
 # v4.6: fan boost when a running compiler is detected. Scans /proc/*/comm
 # (fallback cmdline) every poll-ms (1 s) for: clang, clang++, gcc, g++, cc, c++,
 # cc1, cc1plus, make, cmake, ninja, cargo, rustc, meson, go, javac, ld, as,
@@ -240,8 +272,8 @@ cpu-temp-gate = 70
 # 0 = disabled.
 # Guard: busy is unreliable for pstate-settle-ms after power-on — the busy<5%
 # escape only after that time (no churn when CPU ≥ threshold).
-cpu-temp-promote = 80
-pstate-settle-ms = 10000
+cpu-temp-promote = 70
+pstate-settle-ms = 2000
 pstate-write-timeout-ms = 2000
 
 # dGPU power backend.

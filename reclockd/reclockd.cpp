@@ -174,7 +174,7 @@
 //      (profil/ladder) bez zmian. Status: dgpu_state / input_active / video.
 //
 // v5.6 (2026-08-28):
-//   S. SWITCHD TUNE: przeglądarki USUNIĘTE z [dgpu-hard] — karty
+//   S. SWITCHD TUNE (raport 86): przeglądarki USUNIĘTE z [dgpu-hard] — karty
 //      Discord/YouTube promują po tytule okna ([preferred-titles], icontains)
 //      zamiast po klasie; reszta kart jest neutralna (iGPU). Promocja tytułowa
 //      NIE jest zapinką: busy < title-idle-busy (default 33%, [switch]) przez
@@ -184,22 +184,55 @@
 //      = 1000 ms. [dgpu-active] bez zmian.
 //
 // v5.9 (2026-08-28):
+//   Z. FIX MPV NIGDY NIE PROMOWAŁ: gałąź twardej promocji była gated `if (hard)`,
+//      a klasa [dgpu-idle] (mpv) NIE ustawia hard — od v5.7 idle_class nigdy nie
+//      wchodziła do gałęzi promocji (wszystkie gate'y v5.7-v5.9 działały na klasie,
+//      która nie promuje). Warunek: `if (hard || idle_class)`.
+//   Z2. FIX TRZYMANIE mpv PRZY GORĄCYM CPU: escape busy<5% (truly_idle) działał
+//      mimo gorącego CPU → mpv demotował po pstate-settle-ms (busy≈0 — render
+//      poza dGPU). Teraz escape tylko przy chłodnym CPU — gorący CPU trzyma dGPU.
+//   Z3. FIX FAŁSZYWE BOOSTY: cmdline nieczytelny (proces zginął w trakcie skanu)
+//      → pomiń, nie boost — krótkotrwałe LaunchTesty wywoływały boost co kilka s.
+//   Z4. FIX UP-FLOOR BEZ BRAMKI TEMP: floor [caps] (mpv 0a) po power-onie nie
+//      wymaga już temp_low_dwell — gorąca obudowa trzymała dGPU na ~65-71°C ≥
+//      temp-up (65) i mpv wisiał na 07 po promocji (decyzja usera: 0a optymalny,
+//      07 za wolny dla wideo). pstate-settle-ms 10000 → 2000 (kernel 0011-0013
+//      zweryfikowany — zapisy po power-onie bezpieczne; 10 s na 07 tnie wideo).
 //   X. KRZYWA FAN 3-PUNKTOWA: [fan] temp-mid/fan-mid + temp-mid-igd/fan-mid-igd —
 //      interpolacja dwuodcinkowa (% zakresu RPM), po temp-mid stromo do max.
 //      temp-max 99→90: pełne obroty przy 90°C. mid=0 → legacy liniowa.
-//   Y. CPU-TEMP-PROMOTE: [switch] cpu-temp-promote=80 — karta tytułowa (YT/
+//   Y. CPU-TEMP-PROMOTE: [switch] cpu-temp-promote=70 — karta tytułowa (YT/
 //      Discord): CPU ≥ próg → re-promocja bez zmiany tytułu + demote zablokowany
 //      (dGPU < temp-gate, busy ≥ 5%) — odciążenie CPU przy wysokiej temperaturze.
 //      Guard: escape busy<5% dopiero po pstate-settle-ms od promocji (busy po
-//      power-onie niewiarygodny — bez churnu przy CPU ≥ progu).
+//      power-onie niewiarygodny — bez churnu przy CPU ≥ progu). Po power-onie
+//      przez pstate-settle-ms temp dGPU nie bramkuje (odczyt nieświeży — dGPU
+//      z OFF ma zapas z definicji).
 //
+// v5.10 (2026-08-28):
+//   AA. TERMIKA OBUDOWY [fan-case] (raport 97, wariant B pełny a+b+c):
+//       pomiar ŚREDNIEJ temperatury obudowy (applesmc po ETYKIETACH tempN_label
+//       → klucz SMC, nie po indeksach; klucze z configu, wartości ujemne m°C
+//       pomijane — niepodłączone -127000, jałowy TCTD -250) + krzywa case
+//       (case-min → case-max liniowo, 0..100% zakresu RPM z [fan]) + SOAK/HOLD
+//       (case > case-min przez case-dwell-ms → SOAK na hold-ms z floor = krzywa
+//       przy case wejścia; wyjście gdy hold wygasł ORAZ case < case-min−margin
+//       przez exit-dwell-ms) + RAMP (±ramp-rpm-s na 1 s; boost kompilatora i
+//       fan-override NADRZĘDNE — pomijają ramp, safety). Sekcja [fan-case]:
+//       enable/keys/case-min/case-max/case-dwell-ms/hold-ms/exit-dwell-ms/
+//       margin/hold-floor/ramp-rpm-s. Status: fan_case_avg (°C, -1 = brak
+//       ważnych odczytów) + fan_case_state (normal|soak) w /run/reclockd/status
+//       i reclockctl. Klawiatura = proxy TC0E/TC0F (rama pod klawiaturą) —
+//       POZA zestawem B (duplikat krzywej CPU, raport 97 §2.3). enable=false
+//       (default) → stary algorytm wentylatorów 1:1 (escape hatch).
+
 // v5.8 (2026-08-28):
 //   W. TESTY POZA BOOSTEM KOMPILATORA: procesy testowe — cmake -P LaunchTest.cmake
 //      (CTest/GoogleTest), ctest, "make test"/"make check" — NIE liczą się jako
 //      kompilator (boost wentylatorów tylko przy faktycznej kompilacji).
 //
 // v5.7 (2026-08-28):
-//   T. CPU-TEMP-GATE: klasa [dgpu-idle] (mpv) NIE demotuje gdy CPU
+//   T. CPU-TEMP-GATE (raport 87): klasa [dgpu-idle] (mpv) NIE demotuje gdy CPU
 //      jest gorący (robi coś innego — np. kompilacja) a dGPU ma zapas termalny
 //      (cpu >= cpu-temp-gate [switch], default 70°C; dGPU < temp-gate). busy
 //      < 5% (pauza) → demote ZAWSZE. Klucz [switch] cpu-temp-gate (0 = off).
@@ -398,6 +431,21 @@ struct Config {
     int  fan_mid        = 0;      // % zakresu RPM przy temp-mid (dga; 0 = wyłączony)
     int  fan_temp_mid_igd = 0;    // °C punkt przegięcia (tylko-iGPU; 0 = wyłączony)
     int  fan_mid_igd    = 0;      // % zakresu RPM przy temp-mid (tylko-iGPU; 0 = wył.)
+    // v5.10: sekcja [fan-case] — termika obudowy (raport 97, wariant B pełny):
+    // krzywa case (średnia applesmc) + SOAK/HOLD (trzymanie podbitych obrotów
+    // przez czas) + RAMP (limit zmian RPM na 1 s). enable=false (default) →
+    // stary algorytm wentylatorów 1:1 (escape hatch).
+    struct FanCaseCfg {
+        bool enable = false;
+        std::vector<std::string> keys;  // klucze SMC (label) do średniej
+        int case_min = 30;              // °C: case ≤ → 0% zakresu RPM (nic nie wymusza)
+        int case_max = 60;              // °C: case ≥ → 100% zakresu RPM
+        int dwell_in_ms = 5000;         // case > case-min przez tyle → SOAK
+        int hold_ms = 90000;            // górny limit trwania SOAK
+        int exit_dwell_ms = 10000;      // case < case-min−margin przez tyle → NORMAL
+        int margin = 3;                 // °C histerezy przy wyjściu z SOAK
+        int ramp_rpm_s = 150;           // max zmiana RPM na 1 s (0 = bez rampu)
+    } fan_case;
     // v4.6: sekcja [compiler] — boost wentylatorów gdy wykryty kompilator
     // (skan /proc/*/comm z fallbackiem na cmdline). fan_max = % maksymalnych
     // RPM (100 = pełne wiatraki). names = dodatkowe nazwy do wykrycia (przecinkami).
@@ -446,7 +494,7 @@ struct Config {
         // tytułu/focusu + demote zablokowany (dGPU < temp-gate, busy ≥ 5%) —
         // dGPU przejmuje render, CPU się chłodzi. 0 = wyłączony. Konfiguro-
         // walne w [switch] (cpu-temp-promote), reload przez SIGHUP.
-        int  cpu_temp_promote = 80;
+        int  cpu_temp_promote = 70;
         // v5.6: tytuły Discord/YouTube (kopiowane z [preferred-titles] w parserze)
         // — promocja tytułowa karty w przeglądarce, NIE zapinka (idle-release).
         std::set<std::string> preferred_titles;
@@ -516,6 +564,11 @@ static int  g_fan_tmin = 51, g_fan_tmax = 91;
 // v5.9: punkt przegięcia krzywy 3-punktowej (0 = legacy liniowa) — status.
 static int  g_fan_tmid = 0, g_fan_pmid = 0;
 static int  g_fan_rpm1 = 0, g_fan_rpm2 = 0;
+// v5.10: [fan-case] — status (JSON /run/reclockd/status): średnia obudowy (°C,
+// -1 = brak ważnych odczytów) + stan SOAK. Wypełniane w bloku fan, czytane przez
+// write_status() (pstate.sh, pasek Omarchy).
+static double g_fan_case_avg = -1.0;
+static const char* g_fan_case_state = "normal";
 
 // ------------------------------------------------------------------ pomocnicze
 
@@ -704,6 +757,44 @@ static bool load_config(const std::string& path, Config& cfg)
             else if (keyf == "fan-mid-igd") cfg.fan_mid_igd      = parse_int(valf);
             continue;
         }
+        // v5.10: sekcja [fan-case] — termika obudowy (raport 97, wariant B).
+        // Klucze: enable, keys (klucze SMC przecinkami), case-min, case-max,
+        // case-dwell-ms (alias dwell-in, w sekundach), hold-ms, exit-dwell-ms
+        // (alias exit-dwell, w sekundach), margin, hold-floor (curve — jedyna
+        // obsługiwana), ramp-rpm-s.
+        if (section == "fan-case") {
+            size_t eqh = t.find('=');
+            if (eqh == std::string::npos) continue;
+            std::string keyh = trim(t.substr(0, eqh));
+            std::string valh = trim(t.substr(eqh + 1));
+            if      (keyh == "enable")        cfg.fan_case.enable = (valh == "1" || valh == "true" || valh == "yes");
+            else if (keyh == "keys") {
+                cfg.fan_case.keys.clear();
+                size_t p0 = 0;
+                while (p0 <= valh.size()) {
+                    size_t csep = valh.find(',', p0);
+                    std::string tok = trim(valh.substr(p0, csep == std::string::npos
+                        ? std::string::npos : csep - p0));
+                    if (!tok.empty()) cfg.fan_case.keys.push_back(tok);
+                    if (csep == std::string::npos) break;
+                    p0 = csep + 1;
+                }
+            }
+            else if (keyh == "case-min")      cfg.fan_case.case_min = parse_int(valh);
+            else if (keyh == "case-max")      cfg.fan_case.case_max = parse_int(valh);
+            else if (keyh == "case-dwell-ms") cfg.fan_case.dwell_in_ms = parse_int(valh);
+            else if (keyh == "dwell-in")      cfg.fan_case.dwell_in_ms = parse_int(valh) * 1000; // sekundy
+            else if (keyh == "hold-ms")       cfg.fan_case.hold_ms = parse_int(valh);
+            else if (keyh == "exit-dwell-ms") cfg.fan_case.exit_dwell_ms = parse_int(valh);
+            else if (keyh == "exit-dwell")    cfg.fan_case.exit_dwell_ms = parse_int(valh) * 1000; // sekundy
+            else if (keyh == "margin")        cfg.fan_case.margin = parse_int(valh);
+            else if (keyh == "hold-floor") {
+                // curve — jedyna obsługiwana wartość (floor = krzywa przy case
+                // wejścia w SOAK); inne wartości ignorowane.
+            }
+            else if (keyh == "ramp-rpm-s")    cfg.fan_case.ramp_rpm_s = parse_int(valh);
+            continue;
+        }
         // v4.6: sekcja [compiler] — boost wentylatorów gdy wykryty kompilator.
         // Klucze: enable (1/0), fan-max (% maksymalnych RPM), names (przecinkami).
         if (section == "compiler") {
@@ -865,6 +956,26 @@ static bool load_config(const std::string& path, Config& cfg)
         cfg.fan_temp_mid >= cfg.fan_temp_max) cfg.fan_temp_mid = 0;
     if (cfg.fan_temp_mid_igd <= 0 || cfg.fan_temp_mid_igd <= cfg.fan_temp_min_igd ||
         cfg.fan_temp_mid_igd >= cfg.fan_temp_max_igd) cfg.fan_temp_mid_igd = 0;
+    // v5.10: sanity [fan-case] — termika obudowy. Błędne wartości → disable z
+    // logiem (wzorzec sanity fan powyżej — nigdy ciche 0).
+    if (cfg.fan_case.enable && cfg.fan_case.keys.empty()) {
+        logf(0, "config: [fan-case] enable bez kluczy keys — wyłączam (case nieznany)");
+        cfg.fan_case.enable = false;
+    }
+    if (cfg.fan_case.case_max <= cfg.fan_case.case_min) {
+        logf(0, "config: [fan-case] case-max <= case-min (%d <= %d) — wyłączam",
+             cfg.fan_case.case_max, cfg.fan_case.case_min);
+        cfg.fan_case.enable = false;
+    }
+    if (cfg.fan_case.margin < 1) cfg.fan_case.margin = 1;
+    if (cfg.fan_case.dwell_in_ms < 0) cfg.fan_case.dwell_in_ms = 0;
+    if (cfg.fan_case.exit_dwell_ms < 0) cfg.fan_case.exit_dwell_ms = 0;
+    if (cfg.fan_case.hold_ms < 1000) {
+        logf(0, "config: [fan-case] hold-ms < 1000 (%d) — koryguję na 90000",
+             cfg.fan_case.hold_ms);
+        cfg.fan_case.hold_ms = 90000;
+    }
+    if (cfg.fan_case.ramp_rpm_s < 0) cfg.fan_case.ramp_rpm_s = 0;
     // v4.6: sanity compiler — fan-max clamp do [0,100] (100 = pełne wiatraki).
     if (cfg.compiler_fan_max < 0) cfg.compiler_fan_max = 0;
     if (cfg.compiler_fan_max > 100) cfg.compiler_fan_max = 100;
@@ -896,8 +1007,8 @@ static bool load_config(const std::string& path, Config& cfg)
     if (cfg.sw.class_idle_busy < 0 || cfg.sw.class_idle_busy > 100) cfg.sw.class_idle_busy = 33;
     // v5.7: sanity cpu-temp-gate — °C clamp [0,100]; 0 = wyłączony; błędna → 70.
     if (cfg.sw.cpu_temp_gate < 0 || cfg.sw.cpu_temp_gate > 100) cfg.sw.cpu_temp_gate = 70;
-    // v5.9: sanity cpu-temp-promote — °C clamp [0,100]; 0 = wyłączony; błędna → 80.
-    if (cfg.sw.cpu_temp_promote < 0 || cfg.sw.cpu_temp_promote > 100) cfg.sw.cpu_temp_promote = 80;
+    // v5.9: sanity cpu-temp-promote — °C clamp [0,100]; 0 = wyłączony; błędna → 70.
+    if (cfg.sw.cpu_temp_promote < 0 || cfg.sw.cpu_temp_promote > 100) cfg.sw.cpu_temp_promote = 70;
     // v5.4: sanity [dgpu-active]. Stany muszą być znane (07/0a/0e/0f) i
     // baseline <= max. Progi busy clamp do [0,100]. activity-source: tylko
     // "evdev" daje sygnał inputu; "none"/"cursorpos" → brak (idle po dwell).
@@ -1151,6 +1262,8 @@ public:
     // tmin>=tmax (zły config) → clamp do max RPM (bezpieczniej chłodzić).
     // v5.9: krzywa dwuodcinkowa: temp-min → temp-mid (fan-mid% zakresu) → temp-max.
     // temp-mid ≤ 0 lub poza (temp-min, temp-max) → legacy liniowa.
+    // v5.10: pct liczy pct_from_temp(), zapis przez set_pct() (RAMP aktywny gdy
+    // [fan-case] włączony — escape hatch: enable=false → stary algorytm 1:1).
     void set(int ft, int tmin, int tmid, int tmax, int pmid)
     {
         if (!ok_) return;
@@ -1158,6 +1271,16 @@ public:
         // Wcześniej fail-safe "nie ruszaj" zostawiał wentylatory na ostatniej
         // wartości; po power-off dGPU temp jest stale -1, więc krzywa musi zejść
         // do min (SMC ma ochronę termiczną nadrzędną nad manual).
+        int delta = g_cfg.fan_case.enable ? g_cfg.fan_case.ramp_rpm_s : 0;
+        set_pct(pct_from_temp(ft, tmin, tmid, tmax, pmid), delta);
+        last_temp_ = ft;
+    }
+
+    // v5.10: kalkulator % zakresu RPM z temperatury (krzywa 3-punktowa / legacy
+    // liniowa) — wydzielony z set() żeby blok fan mógł składać
+    // max(pct_cpu, pct_case, soak_floor) zanim trafi do zapisu. Zwraca pct ∈ [0,1].
+    double pct_from_temp(int ft, int tmin, int tmid, int tmax, int pmid) const
+    {
         if (ft < 0) ft = tmin;
         double pct;
         if (tmid > tmin && tmid < tmax && pmid > 0) {
@@ -1173,32 +1296,45 @@ public:
         }
         if (pct < 0.0) pct = 0.0;
         if (pct > 1.0) pct = 1.0;
+        return pct;
+    }
+
+    // v5.10: zapis RPM z % zakresu + RAMP: zmiana od poprzedniego zapisu
+    // clampowana do ±max_delta_rpm na tick (1 s). max_delta=0 → bez rampu.
+    // Boost kompilatora i fan-override są NADRZĘDNE i pomijają ramp (safety).
+    void set_pct(double pct, int max_delta_rpm)
+    {
+        if (!ok_) return;
+        if (pct < 0.0) pct = 0.0;
+        if (pct > 1.0) pct = 1.0;
         int rpm1 = fan1_min_ + (int)(pct * (fan1_max_ - fan1_min_) + 0.5);
         int rpm2 = fan2_min_ + (int)(pct * (fan2_max_ - fan2_min_) + 0.5);
+        if (max_delta_rpm > 0) {
+            if (last_rpm1_ > 0)
+                rpm1 = std::clamp(rpm1, last_rpm1_ - max_delta_rpm, last_rpm1_ + max_delta_rpm);
+            if (last_rpm2_ > 0)
+                rpm2 = std::clamp(rpm2, last_rpm2_ - max_delta_rpm, last_rpm2_ + max_delta_rpm);
+        }
         write_file((std::string(FAN_BASE) + "/fan1_manual").c_str(), "1");
         write_file((std::string(FAN_BASE) + "/fan2_manual").c_str(), "1");
         write_file((std::string(FAN_BASE) + "/fan1_output").c_str(), std::to_string(rpm1));
         write_file((std::string(FAN_BASE) + "/fan2_output").c_str(), std::to_string(rpm2));
-        last_temp_ = ft; last_rpm1_ = rpm1; last_rpm2_ = rpm2;
+        last_rpm1_ = rpm1; last_rpm2_ = rpm2;
     }
 
     // v4.6: BOOST — wymuś pct% maksymalnych RPM (100 = pełne wiatraki). Zamiast
     // krzywej temp→RPM, stały procent zakresu: rpm = fanN_min + pct/100*(fanN_max
     // - fanN_min). Manual=1 + zapis output dla obu wentylatorów (jak set()).
     // pct clamp do [0,100]. Używane gdy wykryty kompilator (sekcja [compiler]).
+    // v5.10: zapis przez set_pct() z max_delta=0 — boost NADRZĘDNY, pomija ramp
+    // (wentylatory mają dojść do fan-max% natychmiast — safety termiczna).
     void set_boost(int pct)
     {
         if (!ok_) return;
         if (pct < 0) pct = 0;
         if (pct > 100) pct = 100;
-        double x = pct / 100.0;
-        int rpm1 = fan1_min_ + (int)(x * (fan1_max_ - fan1_min_) + 0.5);
-        int rpm2 = fan2_min_ + (int)(x * (fan2_max_ - fan2_min_) + 0.5);
-        write_file((std::string(FAN_BASE) + "/fan1_manual").c_str(), "1");
-        write_file((std::string(FAN_BASE) + "/fan2_manual").c_str(), "1");
-        write_file((std::string(FAN_BASE) + "/fan1_output").c_str(), std::to_string(rpm1));
-        write_file((std::string(FAN_BASE) + "/fan2_output").c_str(), std::to_string(rpm2));
-        last_temp_ = -1; last_rpm1_ = rpm1; last_rpm2_ = rpm2;
+        set_pct(pct / 100.0, 0);
+        last_temp_ = -1;
     }
 
     // Fail-safe: zwróć kontrolę do SMC. Wołane przy wyjściu demona (restore).
@@ -1225,6 +1361,74 @@ private:
     int fan2_min_ = 0, fan2_max_ = 0;
     int last_temp_ = -1, last_rpm1_ = 0, last_rpm2_ = 0;
 };
+
+// ----------------------------------------------------------- termika obudowy (case)
+// v5.10: pomiar ŚREDNIEJ temperatury obudowy — [fan-case] (raport 97 §2/§4.2).
+// Mapowanie po ETYKIETACH (tempN_label → klucz SMC), NIE po indeksach tempN
+// (kolejność kluczy z SMC może się różnić między modelami/firmwarem). Co tick
+// czyta tylko klucze z configu ([fan-case] keys) przez mapę label→ścieżka.
+// Wartości w m°C; ujemne pomijane (niepodłączone -127000, jałowy dummy TCTD
+// -250). Brak ważnych odczytów → -1 (człon case wyłączony — fallback sam CPU).
+
+class SmcCase {
+public:
+    void init() { rescan(); }
+
+    // Rebuild mapy label→ścieżka (tani — przy SIGHUP, gdyby SMC dodał czujniki).
+    void rescan()
+    {
+        labels_.clear();
+        for (int i = 1; i <= 40; i++) {
+            std::string base = std::string(FAN_BASE) + "/temp" + std::to_string(i);
+            std::string label;
+            if (read_file((base + "_label").c_str(), label) != 0) continue;
+            labels_[trim(label)] = base + "_input";
+        }
+    }
+
+    // Średnia arytmetyczna (°C) ważnych kluczy z `keys`; -1 gdy zero ważnych
+    // odczytów. Brakujący klucz (literówka/brak czujnika) → pominięty + warning
+    // RAZ na klucz (missing_logged — wzorzec gate_logged_ L2193-2200).
+    double read_avg(const std::vector<std::string>& keys,
+                    std::set<std::string>& missing_logged) const
+    {
+        double sum = 0.0;
+        int n = 0;
+        for (const auto& k : keys) {
+            auto it = labels_.find(k);
+            if (it == labels_.end()) {
+                if (missing_logged.insert(k).second)
+                    logf(0, "fan-case: klucz \"%s\" nieznaleziony w applesmc — pomijany",
+                         k.c_str());
+                continue;
+            }
+            std::string s;
+            if (read_file(it->second.c_str(), s) != 0) continue;
+            long raw = std::atol(s.c_str());
+            if (raw < 0) continue;   // niepodłączone / jałowy dummy
+            sum += raw / 1000.0;
+            n++;
+        }
+        return n > 0 ? sum / n : -1.0;
+    }
+
+    int label_count() const { return (int)labels_.size(); }
+
+private:
+    std::map<std::string, std::string> labels_;   // label SMC → ścieżka tempN_input
+};
+
+// v5.10: krzywa case — liniowa interpolacja: case ≤ case-min → 0 (nic nie
+// wymusza — min RPM), case ≥ case-max → 1 (100% zakresu RPM), między liniowo.
+// Działa na tym samym zakresie RPM co [fan]: mapowanie pct→RPM robi
+// Fan::set_pct przez fanN_min/max (liniowe — równoważne liczeniu w RPM).
+// case_avg < 0 (brak ważnych odczytów) → 0 — człon wyłączony.
+static double fan_case_pct(double case_avg, int case_min, int case_max)
+{
+    if (case_avg < 0 || case_avg <= case_min) return 0.0;
+    if (case_avg >= case_max) return 1.0;
+    return (case_avg - case_min) / (double)(case_max - case_min);
+}
 
 static bool fan_override_active()
 {
@@ -1305,10 +1509,15 @@ static std::string compiler_running()
             if (!found.empty()) {
                 // v5.8: pełny cmdline rozstrzyga — procesy testowe (cmake -P
                 // LaunchTest.cmake / ctest / "make test"/"make check") nie są
-                // kompilatorem; pomiń i skanuj dalej. Gdy cmdline nieczytelny →
-                // traktuj jak kompilator (bezpiecznie dla boostu).
+                // kompilatorem; pomiń i skanuj dalej.
+                // v5.9 fix: cmdline nieczytelny = proces zginął w trakcie skanu
+                // (krótkotrwałe LaunchTesty umierają między comm a cmdline) —
+                // pomiń, NIE boost (fałszywe wykrycia co kilka sekund; żywy
+                // kompilator złapie kolejny skan za 1 s).
                 std::string cmdline;
-                if (read_file((bp + "/cmdline").c_str(), cmdline) == 0 && is_test_runner(cmdline))
+                if (read_file((bp + "/cmdline").c_str(), cmdline) != 0)
+                    continue;
+                if (is_test_runner(cmdline))
                     continue;
                 break;
             }
@@ -2074,7 +2283,9 @@ public:
             return (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - tp).count();
         };
 
-        const bool thermal_ok = (in.temp < 0 || in.temp < cfg.temp_gate);
+        // v5.9: dGPU OFF (target IGPU) nie może być gorący — nieświeży hwmon
+        // sprzed power-off nie blokuje promocji.
+        const bool thermal_ok = (target_ == IGPU) || in.temp < 0 || in.temp < cfg.temp_gate;
 
         // Twarda promocja: focused class ∈ dgpu_hard LUB external LUB dgpu_procs
         // (bez tytułu — v5.6 przeglądarki usunięte z [dgpu-hard]).
@@ -2109,10 +2320,13 @@ public:
         if (idle_title) {
             bool cpu_offload = cfg.cpu_temp_promote > 0 && in.cpu_temp >= 0 &&
                                in.cpu_temp >= cfg.cpu_temp_promote;
-            bool dgpu_hot = in.temp >= 0 && in.temp >= cfg.temp_gate;
             // v5.9 guard: po power-on busy ≈ 0% (liczniki świeże) — przed
             // pstate-settle-ms od promocji trzymaj dGPU (escape busy<5% później).
             bool fresh_on = since(last_promote_) < cfg.pstate_settle_ms;
+            // v5.9: po power-onie odczyt temp dGPU bywa nieświeży (ostatnia
+            // wartość sprzed OFF / nasączenie obudowy przy gorącym CPU) —
+            // przez pstate-settle-ms dGPU traktowany jak zimny (był OFF).
+            bool dgpu_hot = !fresh_on && in.temp >= 0 && in.temp >= cfg.temp_gate;
             if (cpu_offload && !dgpu_hot && ((int)in.busy >= 50 || fresh_on))
                 idle_title = false;
         }
@@ -2135,7 +2349,10 @@ public:
         // Twarda promocja — latch (jak dotychczas, early return). Sygnał twardy
         // trzyma dGPU NAWET gdy temp >= temp_gate (gate termiczny blokuje promocję,
         // ale nie demotuj pod aktywnym wymaganiem — inaczej flapping).
-        if (hard) {
+        // v5.9 fix: idle_class (mpv) TEŻ wchodzi do tej gałęzi — bez tego klasa
+        // [dgpu-idle] nigdy nie promowała (hard ustawiają tylko dgpu_hard/external/
+        // dgpu_procs); cała logika idle_now/gate'ów poniżej jest dla niej.
+        if (hard || idle_class) {
             dwell_out_ = 0;   // promocja kasuje sygnał demote
             // v5.6: [dgpu-idle] — idle-demote (np. mpv): gdy busy_known i busy <
             // class_idle_busy → NIE trzymaj dGPU (fall through do wspólnej ścieżki
@@ -2147,12 +2364,18 @@ public:
                 // kompilacja) a dGPU ma zapas termalny → trzymaj dGPU.
                 // busy < 5% (pauza) → demote zawsze.
                 bool cpu_hot  = in.cpu_temp >= 0 && in.cpu_temp >= cfg.cpu_temp_gate;
-                bool dgpu_hot = in.temp >= 0 && in.temp >= cfg.temp_gate;
                 // v5.9: po power-on busy jest niewiarygodny (~0%, liczniki świeże) —
                 // escape busy<5% dopiero po pstate-settle-ms od promocji, inaczej
                 // termiczna promocja demotuje po ~1 s i churnuje co hold.
                 bool fresh_on = since(last_promote_) < cfg.pstate_settle_ms;
-                bool truly_idle = (int)in.busy < 50 && !fresh_on;
+                // v5.9: po power-onie odczyt temp dGPU bywa nieświeży (ostatnia
+                // wartość sprzed OFF / nasączenie obudowy przy gorącym CPU) —
+                // przez pstate-settle-ms dGPU traktowany jak zimny (był OFF).
+                bool dgpu_hot = !fresh_on && in.temp >= 0 && in.temp >= cfg.temp_gate;
+                // v5.9 fix: escape busy<5% TYLKO przy chłodnym CPU — przy gorącym
+                // CPU trzymaj dGPU nawet gdy busy≈0 (CPU potrzebuje odciążenia;
+                // demote wróci, gdy CPU ochłonie < cpu-temp-gate).
+                bool truly_idle = (int)in.busy < 50 && !fresh_on && !cpu_hot;
                 if (cpu_hot && !dgpu_hot && !truly_idle) {
                     idle_now = false;
                     if (!gate_logged_) {
@@ -2672,7 +2895,7 @@ private:
     {
         auto st = power_.read();
         int igpu_freq = read_igpu_freq_mhz();
-        char buf[768];
+        char buf[1024];
         // v5.4: "dgpu_state" niesie stan pstate [dgpu-active] (active|deep_idle|
         // heavy|off), gdy sekcja wyłączona → historyczne on/off (power). Power
         // on/off zostaje w "dgpu_power". Nowe pola: input_active (1/0), video (1/0).
@@ -2686,7 +2909,8 @@ private:
             "\"last_error\": \"%s\", \"nvram_prefs\": \"%s\", \"igpu_freq_mhz\": %d, "
             "\"fan_curve\": \"%s\", \"fan_tmin\": %d, \"fan_tmax\": %d, "
             "\"fan_tmid\": %d, \"fan_pmid\": %d, "
-            "\"fan_rpm1\": %d, \"fan_rpm2\": %d, \"ts\": %lld }\n",
+            "\"fan_rpm1\": %d, \"fan_rpm2\": %d, "
+            "\"fan_case_avg\": %.1f, \"fan_case_state\": \"%s\", \"ts\": %lld }\n",
             topo_.name(), st.on() ? "on" : "off", dgpu_state_val,
             dgpu_input_active_, dgpu_video_,
             target_name(), json_escape(override_).c_str(),
@@ -2694,6 +2918,7 @@ private:
             json_escape(last_error_).c_str(), nvram_prefs_.c_str(), igpu_freq,
             g_fan_curve.c_str(), g_fan_tmin, g_fan_tmax, g_fan_tmid, g_fan_pmid,
             g_fan_rpm1, g_fan_rpm2,
+            g_fan_case_avg, g_fan_case_state,
             (long long)std::time(nullptr));
         write_file(SWITCH_STATUS_FILE, buf);
         write_file(SWITCH_DGPU_FILE, st.on() ? "on" : "off");
@@ -2848,15 +3073,12 @@ private:
 static void usage(const char* argv0)
 {
     std::printf(
-        "reclockd v5.9 — polityka profilowa (app-aware) + wentylatory + switchd + [dgpu-active] + switchd tune + override + reload + nvram cache\n"
+        "reclockd v5.10 — polityka profilowa (app-aware) + wentylatory + [fan-case] + switchd + [dgpu-active] + override + reload + nvram cache\n"
         "Użycie: %s [opcje]\n"
         "  switchd (v5.0): dGPU power-state + render routing. W DIS = monitor\n"
         "    (zero zmian power). Sekcje [switch]/[dpower]/[dgpu-hard]/[dgpu-soft]\n"
         "    /[igpu]/[dgpu-procs]. Status: /run/reclockd/status.\n"
-        "  switchd tune (v5.6): przeglądarki usunięte z [dgpu-hard] — karty\n"
-        "    Discord/YouTube promują po tytule ([preferred-titles]); promocja\n"
-        "    tytułowa NIE jest zapinką (busy < title-idle-busy → demote).\n"
-        "  [dgpu-active] (v5.4): trójstopniowa polityka dla CAŁEGO dGPU-ON:\n"
+        "  [dgpu-active] (v5.6): trójstopniowa polityka dla CAŁEGO dGPU-ON:\n"
         "    baseline (0a) / deep idle (07) / heavy (0e). Aktywność usera przez\n"
         "    evdev (/dev/input/event*). 0e WYŁĄCZNIE busy-driven (busy>busy-enter\n"
         "    + temp<temp-up); tytuł/klasa video tylko informacyjnie. [caps] floor\n"
@@ -3063,6 +3285,23 @@ int main(int argc, char** argv)
         logf(1, "fan: wyłączony w configu (enable=false)");
     }
 
+    // v5.10: termika obudowy — [fan-case]. Init = skan etykiet applesmc
+    // (label → ścieżka tempN_input); case mierzony tylko gdy sekcja włączona.
+    SmcCase smc_case;
+    if (g_cfg.fan_case.enable) {
+        smc_case.init();
+        logf(1, "fan-case: applesmc etykiety: %d znalezionych, keys=%zu, "
+                "krzywa case %d-%d°C, dwell-in=%dms, hold=%dms, exit-dwell=%dms, "
+                "margin=%d°C, ramp=%d RPM/s",
+             smc_case.label_count(), g_cfg.fan_case.keys.size(),
+             g_cfg.fan_case.case_min, g_cfg.fan_case.case_max,
+             g_cfg.fan_case.dwell_in_ms, g_cfg.fan_case.hold_ms,
+             g_cfg.fan_case.exit_dwell_ms, g_cfg.fan_case.margin,
+             g_cfg.fan_case.ramp_rpm_s);
+    } else {
+        logf(1, "fan-case: wyłączony w configu (brak/disable [fan-case]) — stary algorytm 1:1");
+    }
+
     // v4.6: detekcja kompilatorów (boost wentylatorów). Status przy starcie.
     if (g_cfg.compiler_enable)
         logf(1, "compiler: detekcja /proc AKTYWNA (boost fan-max=%d%%)",
@@ -3164,6 +3403,15 @@ int main(int argc, char** argv)
     // v4.2: poprzednie RPM do logowania zmian (poziom 1) vs co-1s log (poziom 2).
     int prev_fan_rpm1 = -1, prev_fan_rpm2 = -1;
     bool prev_fan_override = false;
+    // v5.10: [fan-case] — maszyna stanów SOAK (wzorce: dwell counter L2267-2270,
+    // steady_clock deadline L1390-1407). Stan przetrwa SIGHUP (jak SwitchPolicy).
+    enum class FanCaseState { NORMAL, SOAK };
+    FanCaseState fan_case_state = FanCaseState::NORMAL;
+    int fan_case_dwell_in = 0;        // ms case > case-min (NORMAL → SOAK)
+    int fan_case_exit_dwell = 0;      // ms case < case-min−margin (SOAK → NORMAL)
+    double fan_case_entry_avg = -1.0; // case_avg przy wejściu w SOAK (floor)
+    std::chrono::steady_clock::time_point fan_case_hold_until{};
+    std::set<std::string> missing_case_keys;   // warning o błędnych keys — raz
 
     // v5.4: [dgpu-active] — status w start logu.
     std::string dgpu_active_log = "off";
@@ -3173,7 +3421,7 @@ int main(int argc, char** argv)
                           " evdev=" + std::to_string(input.device_count()) + " urz.";
     }
 
-    logf(1, "start v5.9: interval=%dms poll=%dms, "
+    logf(1, "start v5.10: interval=%dms poll=%dms, "
             "default[cap=%s temp-up=%d temp-down=%d], "
             "preferred[cap=%s boost=%s busy-boost=%d%% boost-dwell=%dms "
             "temp-up=%d temp-down=%d], "
@@ -3181,7 +3429,7 @@ int main(int argc, char** argv)
             "profile-dwell=%dms, hwmon=%s, hypr=%s, vblank=%d, "
             "gr-idle=%d‰, preferred-titles=%zu, low-power=%zu, "
             "fan=%s temp[%d-%d] igd[%d-%d] fan1[%d-%d] fan2[%d-%d], stan=%s, switch=%s, "
-            "dgpu-active=%s",
+            "dgpu-active=%s, fan-case=%s case[%d-%d] keys=%zu soak=%dms ramp=%d",
          g_cfg.interval_ms, g_cfg.poll_ms,
          state_hex(g_cfg.def.max_pstate), g_cfg.def.temp_up, g_cfg.def.temp_down,
          state_hex(g_cfg.preferred.max_pstate),
@@ -3198,7 +3446,11 @@ int main(int argc, char** argv)
          g_cfg.fan_temp_min, g_cfg.fan_temp_max,
          g_cfg.fan_temp_min_igd, g_cfg.fan_temp_max_igd,
          fan.fan1_min(), fan.fan1_max(), fan.fan2_min(), fan.fan2_max(),
-         cur.c_str(), sw.mode_name(), dgpu_active_log.c_str());
+         cur.c_str(), sw.mode_name(), dgpu_active_log.c_str(),
+         g_cfg.fan_case.enable ? "tak" : "off",
+         g_cfg.fan_case.case_min, g_cfg.fan_case.case_max,
+         g_cfg.fan_case.keys.size(), g_cfg.fan_case.hold_ms,
+         g_cfg.fan_case.ramp_rpm_s);
 
     const int busy_up_pp   = g_cfg.busy_up   * 10;
     const int busy_down_pp = g_cfg.busy_down * 10;
@@ -3228,6 +3480,8 @@ int main(int argc, char** argv)
                 if (cli_exit.set)        nc.exit_state = cli_exit.v;
                 if (cli_vblank)          nc.vblank_sync = cli_vblank_val;
                 g_cfg = nc;
+                // v5.10: świeża mapa etykiet applesmc (gdyby SMC dodał czujniki).
+                if (g_cfg.fan_case.enable) smc_case.rescan();
                 logf(1, "SIGHUP: config przeładowany (%s)", g_config_path.c_str());
             } else {
                 logf(0, "SIGHUP: błąd reloadu configu — zostaję przy starym");
@@ -3295,7 +3549,81 @@ int main(int argc, char** argv)
                     fan.set_boost(g_cfg.compiler_fan_max);
                     g_fan_curve = "compiler";
                 } else {
-                    fan.set(ft, tmin, tmid, tmax, pmid);
+                    // v5.10: [fan-case] — krzywa obudowy + SOAK/HOLD + RAMP
+                    // (raport 97, wariant B). Priorytety: max(pct_cpu, pct_case,
+                    // soak_floor); zapis przez set_pct (RAMP ±ramp-rpm-s).
+                    // Boost kompilatora (wyżej) i fan-override są nadrzędne —
+                    // pomijają ramp (safety). Wybór krzywej igd/dga bez zmian:
+                    // case działa niezależnie od stanu dGPU (zestaw B nie zawiera
+                    // TG0P — bez skoku RPM przy power-on).
+                    double pct_cpu = fan.pct_from_temp(ft, tmin, tmid, tmax, pmid);
+                    double pct_target = pct_cpu;
+                    double case_avg = -1.0;
+                    if (g_cfg.fan_case.enable) {
+                        case_avg = smc_case.read_avg(g_cfg.fan_case.keys,
+                                                     missing_case_keys);
+                        double pct_case = fan_case_pct(case_avg,
+                                                       g_cfg.fan_case.case_min,
+                                                       g_cfg.fan_case.case_max);
+                        auto now = std::chrono::steady_clock::now();
+                        if (fan_case_state == FanCaseState::NORMAL) {
+                            // NORMAL → SOAK: case > case-min przez dwell-in
+                            // (counter, wzorzec dwell_out_ L2267-2270).
+                            fan_case_dwell_in = (case_avg > g_cfg.fan_case.case_min)
+                                ? fan_case_dwell_in + g_cfg.poll_ms : 0;
+                            if (case_avg > g_cfg.fan_case.case_min &&
+                                fan_case_dwell_in >= g_cfg.fan_case.dwell_in_ms) {
+                                fan_case_state = FanCaseState::SOAK;
+                                fan_case_entry_avg = case_avg;
+                                fan_case_hold_until = now + std::chrono::milliseconds(
+                                    g_cfg.fan_case.hold_ms);
+                                fan_case_exit_dwell = 0;
+                                logf(1, "fan-case: SOAK (case %.1f°C > %d°C przez %d ms, "
+                                        "hold %d ms, floor=krzywa przy %.1f°C)",
+                                     case_avg, g_cfg.fan_case.case_min,
+                                     fan_case_dwell_in, g_cfg.fan_case.hold_ms,
+                                     fan_case_entry_avg);
+                            }
+                        } else {
+                            // SOAK → NORMAL: dopiero gdy hold wygasł ORAZ case
+                            // < case-min−margin przez exit-dwell (histereza+czas
+                            // — case oscylujący wokół progu nie klapie SOAK).
+                            fan_case_exit_dwell = (case_avg < g_cfg.fan_case.case_min -
+                                                   g_cfg.fan_case.margin)
+                                ? fan_case_exit_dwell + g_cfg.poll_ms : 0;
+                            if (now >= fan_case_hold_until &&
+                                fan_case_exit_dwell >= g_cfg.fan_case.exit_dwell_ms) {
+                                fan_case_state = FanCaseState::NORMAL;
+                                fan_case_dwell_in = 0;
+                                logf(1, "fan-case: NORMAL (case %.1f°C < %d°C przez %d ms, "
+                                        "hold %d ms minął)",
+                                     case_avg, g_cfg.fan_case.case_min -
+                                     g_cfg.fan_case.margin,
+                                     fan_case_exit_dwell, g_cfg.fan_case.hold_ms);
+                            }
+                        }
+                        pct_target = std::max(pct_target, pct_case);
+                        if (fan_case_state == FanCaseState::SOAK) {
+                            // v5.11: SOAK — target = max(floor_wejścia,
+                            // krzywa(aktualny case)): wiatraki ESCALUJĄ z
+                            // aktualną temperaturą obudowy (nie stoją sztywno
+                            // na floor z wejścia); floor z wejścia = dolna
+                            // granica (wiatraki nie spadają poniżej, póki case
+                            // nie zejdzie — ratchet w dół).
+                            double soak_floor =
+                                fan_case_pct(fan_case_entry_avg,
+                                             g_cfg.fan_case.case_min,
+                                             g_cfg.fan_case.case_max);
+                            pct_target = std::max(pct_target,
+                                std::max(soak_floor, pct_case));
+                            g_fan_case_state = "soak";
+                        } else {
+                            g_fan_case_state = "normal";
+                        }
+                    }
+                    g_fan_case_avg = case_avg;
+                    fan.set_pct(pct_target,
+                                g_cfg.fan_case.enable ? g_cfg.fan_case.ramp_rpm_s : 0);
                     g_fan_curve = igd_curve ? "igd" : "dga";
                     g_fan_tmin = tmin; g_fan_tmax = tmax;
                     g_fan_tmid = tmid; g_fan_pmid = pmid;
@@ -3852,9 +4180,13 @@ int main(int argc, char** argv)
             }
             // UP (o 1 poziom, nigdy skok 07→0e).
             // v4.4: UP-FLOOR — klasa [caps] wraca do stanu spoczynkowego floor
-            // (np. 0a) bez busy-gate (wymaga tylko temp_low; tu nie ma skoku >1).
-            else if (cap_floor >= 0 && g_cur_idx < ceiling && g_cur_idx < cap_floor &&
-                     temp >= 0 && temp_low_dwell >= g_cfg.temp_dwell_ms) {
+            // (np. 0a) bez busy-gate (tu nie ma skoku >1).
+            // v5.9 fix: BEZ bramki temp_low_dwell — w gorącej obudowie dGPU tuż
+            // po power-onie siedzi na ~65-71°C ≥ temp-up (65) i dwell nigdy nie
+            // narastał → mpv po promocji wisiał na 07 (za wolno). Floor to
+            // MINIMUM — podnosimy bezwarunkowo; TERMAL (powyżej) ma priorytet
+            // i w razie czego zjedzie z powrotem.
+            else if (cap_floor >= 0 && g_cur_idx < ceiling && g_cur_idx < cap_floor) {
                 target = g_cur_idx + 1;
                 reason = "UP-FLOOR";
             }

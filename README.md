@@ -185,6 +185,18 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   55-80-90 °C (3-point). `pstate.sh status` now also prints an
   `=== wentylatory ===` section — the active curve + range + RPMs from
   `/run/reclockd/status` (applesmc sysfs fallback when the daemon is down).
+- 🌬 **Case thermal + SOAK (v5.10/v5.11)**: fans follow the **average case
+  temperature** (`[fan-case]`, report 97) instead of just max(CPU, dGPU) —
+  applesmc sensors matched by label (`keys`; the keyboard has no sensor of its
+  own, TC0E/TC0F stays out as a CPU-curve duplicate), linear curve
+  `case-min`→`case-max`, and a **SOAK** state: case above `case-min` for
+  `case-dwell-ms` → the fan floor is held for `hold-ms` and only released after
+  the case drops below `case-min−margin` for `exit-dwell-ms` (thermostat — no
+  hard exit, no flapping at the threshold). v5.11: while SOAK the floor
+  **escalates** with the current case — target = max(entry floor, curve(current
+  case)); the entry floor is just the lower bound. `ramp-rpm-s` caps the RPM
+  change rate (compiler boost and fan-override stay supreme and bypass the
+  ramp). `reclockctl status` prints `fan-case: <°C> (state: soak)`.
 - 🔀 **Browsers force the dGPU on (v5.2)**: browser classes (`chromium`,
   `firefox`, `google-chrome`, `brave`) were added to `[dgpu-hard]` — browser
   focus promotes the dGPU (power-on) with the `[preferred]` profile (pstate
@@ -524,7 +536,7 @@ is out of scope for the gmux.
 | `title-idle-hold-ms` | `30000` | v5.6: after demoting a Discord/YouTube card, keep the dGPU OFF for this long before re-promoting. v5.7: title re-promotion only after a title/focus change — a YT tab with busy below the threshold stays on the iGPU for the whole video (zero churn); a new video → re-promotion |
 | `class-idle-busy` | `33` | v5.6: busy% below which a `[dgpu-idle]` class (e.g. `mpv`) is 'idle' → demote to iGPU (power-off) after `dwell-out-ms`; SIGHUP-reloadable. v5.7: + `cpu-temp-gate` — a hot CPU + dGPU thermal headroom keeps the dGPU despite low busy; pause (busy < 5%) always demotes |
 | `cpu-temp-gate` | `70` | v5.7: CPU temp (°C) threshold for `[dgpu-idle]` (mpv) demote. CPU hotter than the threshold (doing something else, e.g. compiling) + dGPU below `temp-gate` (thermal headroom) → mpv stays on the dGPU. busy < 5% (pause) → always demote. `0` = disabled; SIGHUP-reloadable |
-| `cpu-temp-promote` | `80` | v5.9: CPU temp (°C) threshold for thermal offload of title cards (YT/Discord): CPU ≥ threshold → re-promotion to the dGPU without a title/focus change + demote blocked (dGPU below `temp-gate`, busy ≥ 5%) — the dGPU takes over rendering, the CPU cools down. `0` = disabled; SIGHUP-reloadable; guard: busy<5% escape only after pstate-settle-ms from promotion |
+| `cpu-temp-promote` | `70` | v5.9: CPU temp (°C) threshold for thermal offload of title cards (YT/Discord): CPU ≥ threshold → re-promotion to the dGPU without a title/focus change + demote blocked (dGPU below `temp-gate`, busy ≥ 5%) — the dGPU takes over rendering, the CPU cools down. `0` = disabled; SIGHUP-reloadable; guard: busy<5% escape only after pstate-settle-ms from promotion; for pstate-settle-ms after power-on the dGPU temp does not gate (stale read — a dGPU coming from OFF has thermal headroom by definition) |
 | `pstate-settle-ms` | `10000` | don't write pstate after power-on — GPU clock settle after D3hot→D0 (the first clock change can hang the nouveau workqueue) |
 | `pstate-write-timeout-ms` | `2000` | pstate write runs in a separate thread; on timeout the daemon stays alive and pauses pstate writes |
 
@@ -589,6 +601,26 @@ than the dGPU, hence the separate quieter iGPU curve (defaults 33-80-90 °C,
 (55-80-90 °C, 3-point) curve applies.
 The curve is chosen by the dGPU **power state** (`sw.dgpu_off()`), not the
 topology.
+
+### `[fan-case]` section — case thermal + SOAK (v5.10/v5.11)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enable` | `true` | Enable the case-thermal fan logic; `false` → legacy 1:1 fan algorithm (escape hatch). |
+| `keys` | `Ta0P, TaSP, Th1H, Th2H, Ts0S, Ts1S, TM0P, TP0P` | applesmc sensors, matched by `tempN_label`; arithmetic mean of the values (m°C; negative/unplugged readings skipped — unplugged -127000, idle dummy TCTD). The keyboard has no sensor of its own — TC0E/TC0F (board frame) is outside the set (duplicates the CPU curve). |
+| `case-min` | `30` | °C at/below which the case curve contributes 0%. |
+| `case-max` | `60` | °C at/above which the case curve demands 100% fan RPM. |
+| `case-dwell-ms` | `5000` | Case must stay above `case-min` this long before SOAK engages. |
+| `hold-ms` | `90000` | Minimum time SOAK holds the elevated floor. |
+| `exit-dwell-ms` | `10000` | Case must stay below `case-min−margin` this long (after `hold-ms`) before SOAK exits. |
+| `margin` | `3` | °C hysteresis below `case-min` for the SOAK exit. |
+| `hold-floor` | `curve` | SOAK floor at entry (v5.11: target = max(entry floor, curve(current case)) — fans keep escalating while the case is hot, never drop below the entry floor until it cools). |
+| `ramp-rpm-s` | `150` | Max RPM change per second (compiler boost and fan-override bypass the ramp — safety). |
+
+The case curve is `max()`ed with the CPU curve — a CPU at 90 °C still gets max
+RPM regardless of the case. Status: `fan_case_avg` (°C, -1 = no valid sensors)
+and `fan_case_state` (`normal`/`soak`) in `/run/reclockd/status`, also shown by
+`reclockctl status`.
 
 ### `[profile default]` — non-preferred apps (terminal/editor)
 
