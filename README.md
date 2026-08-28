@@ -530,7 +530,7 @@ is out of scope for the gmux.
 What promotes / demotes:
 
 - `[dgpu-hard]` — window classes that force the dGPU on (hard promotion, no
-  busy gate): `game`, `blender`, `steam` (v5.6: browsers **removed** — a
+  busy gate): `game`, `blender`, `steam`, `mpv` (v5.6: browsers **removed** — a
   focused browser tab no longer forces the dGPU by class; Discord/YouTube tabs
   promote by window title via `[preferred-titles]`, other tabs are neutral).
 - `[dgpu-soft]` — classes with busy-gated soft promotion (empty by default).

@@ -229,6 +229,7 @@ wait-ready-timeout-ms = 10000
 game
 blender
 steam
+mpv
 
 # Klasy okien z miękką promocją (busy-gated) — na start puste
 [dgpu-soft]

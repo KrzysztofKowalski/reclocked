@@ -228,6 +228,7 @@ wait-ready-timeout-ms = 10000
 game
 blender
 steam
+mpv
 
 # Window classes with soft promotion (busy-gated) — empty by default
 [dgpu-soft]

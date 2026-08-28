@@ -549,7 +549,7 @@ Sekcja `[switch]`:
 Co promuje / demote'uje:
 
 - `[dgpu-hard]` — klasy okien wymuszające dGPU (twarda promocja, bez busy
-  gate): `game`, `blender`, `steam` (v5.6: przeglądarki **usunięte** — focus
+  gate): `game`, `blender`, `steam`, `mpv` (v5.6: przeglądarki **usunięte** — focus
   karty w przeglądarce nie wymusza już dGPU po klasie; karty Discord/YouTube
   promują po tytule okna przez `[preferred-titles]`, pozostałe karty są
   neutralne).
