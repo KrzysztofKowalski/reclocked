@@ -1,4 +1,4 @@
-# /etc/reclockd.conf — konfiguracja daemona reclockd v5.6 (polityka [dgpu-active] + fan + switchd)
+# /etc/reclockd.conf — konfiguracja daemona reclockd v5.7 (polityka [dgpu-active] + fan + switchd)
 # Kopiuj: sudo cp reclockd.conf /etc/reclockd.conf
 #
 # Lista class-ów aplikacji "preferred" (hyprctl activewindow/clients .class).
@@ -49,6 +49,9 @@ YouTube
 [caps]
 # discord = floor=0a, max=0e, busy-up=50
 # chrome-discord.com__channels_@me-Default = floor=0a, max=0e, busy-up=50
+# v5.7: mpv — floor 0a (bez declocku do 07 podczas odtwarzania), busy-up 50.
+# (floor działa przy polityce profilowej; przy [dgpu-active] max-pstate ignorowane)
+mpv = floor=0a, max=0e, busy-up=50
 
 # v4.1: klasy okien "low-power" (terminale). Focus okna z tej listy → wymusza
 # profil default (cap=07) z priorytetem nad preferred — nawet jeśli Discord/
@@ -76,10 +79,10 @@ temp-up = 58
 # Apka preferred (przeglądarki): bezpieczna drabinka 07↔0a↔0e (cap 0e).
 # v4.1: 0f WYŁĄCZONY (boost-pstate = -1) — 0e i 0a oba stabilne, 0f bez widocznej
 # różnicy wydajności vs 0e. Jak gorąco → drabinka DOWN 0e→0a (TERMAL, jeden krok).
-# Thermal preferred: powyżej 82°C zwalnia (drabinka), odzysk poniżej 75°C.
+# Thermal preferred: powyżej 85°C zwalnia (drabinka), odzysk poniżej 65°C.
 max-pstate = 0e
-temp-down = 82
-temp-up = 75
+temp-down = 85
+temp-up = 65
 boost-pstate = -1
 busy-boost = 85
 boost-dwell-ms = 5000
@@ -127,11 +130,11 @@ deep-idle-busy = 20
 # nadpisuje globalny busy-up (80) w kontekście dGPU-active.
 busy-enter = 80
 busy-exit = 40
-# Termalne: true = per-profil (def 65/58, preferred 82/75 wg focusa); false =
+# Termalne: true = per-profil (def 65/58, preferred 85/65 wg focusa); false =
 # wspólne temp-down/temp-up poniżej. Wejście 0e wymaga temp < temp-up.
 temp-per-profile = true
-# temp-down = 82
-# temp-up = 75
+# temp-down = 85
+# temp-up = 65
 
 # v4.2: sterowanie wentylatorami applesmc (SMC MacBooka). Krzywa temp→RPM:
 # liniowa interpolacja między fanN_min (przy temp-min) a fanN_max (przy temp-max).
@@ -142,14 +145,14 @@ temp-per-profile = true
 # restore_auto przy wyjściu → fanN_manual=0 (SMC przejmuje, fail-safe).
 # v5.1: temp-min-igd/temp-max-igd — osobna krzywa gdy włączone TYLKO iGPU
 # (dGPU OFF; temp = CPU/coretemp, bo hwmon nouveau znika). Gdy dGPU ON →
-# krzywa temp-min/temp-max (51/91); obie krzywe wchodzą na max przy 91°C.
-# Cichsze: start wiatraków przy 51°C (dga) / 41°C (igd). Wybór wg sw.dgpu_off().
+# krzywa temp-min/temp-max (55/99); obie krzywe wchodzą na max przy 99°C.
+# Cichsze: start wiatraków przy 55°C (dga) / 33°C (igd). Wybór wg sw.dgpu_off().
 [fan]
 enable = true
-temp-min = 51
-temp-max = 91
-temp-min-igd = 41
-temp-max-igd = 91
+temp-min = 55
+temp-max = 99
+temp-min-igd = 33
+temp-max-igd = 99
 
 # v4.6: boost wentylatorów gdy wykryty uruchomiony kompilator. Skan /proc/*/comm
 # (fallback cmdline) co poll-ms (1 s) za: clang, clang++, gcc, g++, cc, c++,
@@ -207,10 +210,18 @@ busy-exit = 40
 title-idle-busy = 70
 # v5.6: po demote karty Discord/YouTube trzymaj dGPU OFF przez ten czas przed
 # ponowną promocją — zapobiega churnowi (grający YT na iGPU nie re-promuje co 3-4 s).
+# v5.7: re-promocja tytułowa tylko po zmianie tytułu/focusu — YT z busy < progu
+# zostaje na iGPU na całe wideo (zero churnu); nowe wideo → re-promocja.
 title-idle-hold-ms = 30000
 # v5.6: busy % poniżej którego klasa [dgpu-idle] (np. mpv) jest 'idle' → demote
 # do iGPU (power-off) po dwell-out. Łatwa zmiana + reload (SIGHUP).
+# v5.7: + cpu-temp-gate — CPU gorący (robi coś innego) + dGPU z zapasem termalnym
+# → trzymaj dGPU mimo busy < progu; pauza (busy < 5%) → demote zawsze.
 class-idle-busy = 33
+# v5.7: próg temp CPU (°C) dla demote klasy [dgpu-idle] (mpv). CPU gorętszy niż
+# próg (robi coś innego) + dGPU poniżej temp-gate (ma zapas termalny) → mpv
+# zostaje na dGPU. busy < 5% (pauza) → demote zawsze. 0 = wyłączony.
+cpu-temp-gate = 70
 pstate-settle-ms = 10000
 pstate-write-timeout-ms = 2000
 

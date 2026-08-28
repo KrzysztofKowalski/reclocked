@@ -179,9 +179,9 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   IGD topology) the nouveau hwmon disappears, so the fan driver reads the CPU
   (`coretemp`) temperature — which can safely run hotter than the dGPU. A
   separate, quieter curve applies: `temp-min-igd` / `temp-max-igd` (defaults
-  41/91 °C) — fans hit max at 91 °C instead of 67 °C. The curve is chosen by
+  33/99 °C) — fans hit max at 99 °C instead of 67 °C. The curve is chosen by
   the dGPU **power state** (`sw.dgpu_off()`), not the topology: OFF → iGPU
-  curve, ON → the standard 51/91 °C. `pstate.sh status` now also prints an
+  curve, ON → the standard 55/99 °C. `pstate.sh status` now also prints an
   `=== wentylatory ===` section — the active curve + range + RPMs from
   `/run/reclockd/status` (applesmc sysfs fallback when the daemon is down).
 - 🔀 **Browsers force the dGPU on (v5.2)**: browser classes (`chromium`,
@@ -216,12 +216,12 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   `min-residence-ms` / `cooldown-ms` / `min-switch-gap-ms` = 1000 ms.
 - 🌡 **Per-profile thermal guard**: thermal downclock is **per-profile**, not
   global. `default` throttles at 65°C / recovers below 58°C; `preferred`
-  throttles at 82°C / recovers below 75°C. Thermal down is prioritized over
+  throttles at 85°C / recovers below 65°C. Thermal down is prioritized over
   load (and over title-priority) in both profiles.
 - 🌀 **Fan control (applesmc)**: on Apple laptops, `reclockd` also drives the
   SMC fans via `/sys/devices/platform/applesmc.768/`. A linear temp→RPM curve
   is interpolated between `fanN_min` and `fanN_max`, which are **read
-  dynamically from sysfs at startup** (not hardcoded). Default band 51-91 °C,
+  dynamically from sysfs at startup** (not hardcoded). Default band 55-99 °C,
   updated every poll cycle, independent of pstate. `reclockctl fan-off`
   freezes auto (drive fans manually); `fan-on` resumes. Fail-safe restores SMC
   auto (`manual=0`) on exit.
@@ -435,6 +435,8 @@ want a **hard** floor (e.g. `floor=0a` = never `07`).
 [caps]
 # discord = floor=0a, max=0e, busy-up=50
 # chrome-discord.com__channels_@me-Default = floor=0a, max=0e, busy-up=50
+# v5.7: mpv — floor 0a (no declock to 07 while playing), busy-up 50
+mpv = floor=0a, max=0e, busy-up=50
 ```
 
 ### 🛡 Suspend/resume self-healing (v4.5)
@@ -516,8 +518,9 @@ is out of scope for the gmux.
 | `busy-enter` | `80` | busy% for soft promotion |
 | `busy-exit` | `40` | busy% for demote |
 | `title-idle-busy` | `70` | v5.6: busy% below which a title-promoted Discord/YouTube card is 'idle' → demote to iGPU (power-off) after `dwell-out-ms`; SIGHUP-reloadable |
-| `title-idle-hold-ms` | `30000` | v5.6: after demoting a Discord/YouTube card, keep the dGPU OFF for this long before re-promoting — prevents churn (playing YT on iGPU does not re-promote every 3-4 s) |
-| `class-idle-busy` | `33` | v5.6: busy% below which a `[dgpu-idle]` class (e.g. `mpv`) is 'idle' → demote to iGPU (power-off) after `dwell-out-ms`; SIGHUP-reloadable |
+| `title-idle-hold-ms` | `30000` | v5.6: after demoting a Discord/YouTube card, keep the dGPU OFF for this long before re-promoting. v5.7: title re-promotion only after a title/focus change — a YT tab with busy below the threshold stays on the iGPU for the whole video (zero churn); a new video → re-promotion |
+| `class-idle-busy` | `33` | v5.6: busy% below which a `[dgpu-idle]` class (e.g. `mpv`) is 'idle' → demote to iGPU (power-off) after `dwell-out-ms`; SIGHUP-reloadable. v5.7: + `cpu-temp-gate` — a hot CPU + dGPU thermal headroom keeps the dGPU despite low busy; pause (busy < 5%) always demotes |
+| `cpu-temp-gate` | `70` | v5.7: CPU temp (°C) threshold for `[dgpu-idle]` (mpv) demote. CPU hotter than the threshold (doing something else, e.g. compiling) + dGPU below `temp-gate` (thermal headroom) → mpv stays on the dGPU. busy < 5% (pause) → always demote. `0` = disabled; SIGHUP-reloadable |
 | `pstate-settle-ms` | `10000` | don't write pstate after power-on — GPU clock settle after D3hot→D0 (the first clock change can hang the nouveau workqueue) |
 | `pstate-write-timeout-ms` | `2000` | pstate write runs in a separate thread; on timeout the daemon stays alive and pauses pstate writes |
 
@@ -536,7 +539,7 @@ What promotes / demotes:
   busy gate): `game`, `blender`, `steam` (v5.6: browsers **removed** — a
   focused browser tab no longer forces the dGPU by class; Discord/YouTube tabs
   promote by window title via `[preferred-titles]`, other tabs are neutral).
-- `[dgpu-idle]` — classes that promote to the dGPU like hard classes, but demote to the iGPU when busy < `class-idle-busy` (default 33%): `mpv` (video on dGPU, pause/idle on iGPU).
+- `[dgpu-idle]` — classes that promote to the dGPU like hard classes, but demote to the iGPU when busy < `class-idle-busy` (default 33%): `mpv` (video on dGPU, pause/idle on iGPU). v5.7: `cpu-temp-gate` keeps the dGPU when the CPU is hot and the dGPU has thermal headroom (no demote churn while a build runs next to a playing video); after a demote, re-promotion needs a title/focus change (or the CPU entering the hot range) plus the `title-idle-hold-ms` hold — no churn on pause. The `[caps]` entry `mpv = floor=0a, max=0e, busy-up=50` keeps mpv at least `0a` on the dGPU (no declock to `07` while playing).
 - `[dgpu-soft]` — classes with busy-gated soft promotion (empty by default).
 - `[igpu]` — classes always kept on the iGPU (demotion): `foot`, `kitty`,
   `alacritty`.
@@ -560,17 +563,17 @@ preferred app is busy in the background.
 | Key | Default | Meaning |
 |---|---|---|
 | `enable` | `true` | Enable applesmc fan control. |
-| `temp-min` | `51` | °C at/below which fans sit at `fanN_min`. |
-| `temp-max` | `91` | °C at/above which fans sit at `fanN_max`. |
-| `temp-min-igd` | `41` | °C (iGPU-only, dGPU OFF) at/below which fans sit at `fanN_min`. |
-| `temp-max-igd` | `91` | °C (iGPU-only, dGPU OFF) at/above which fans sit at `fanN_max`. |
+| `temp-min` | `55` | °C at/below which fans sit at `fanN_min`. |
+| `temp-max` | `99` | °C at/above which fans sit at `fanN_max`. |
+| `temp-min-igd` | `33` | °C (iGPU-only, dGPU OFF) at/below which fans sit at `fanN_min`. |
+| `temp-max-igd` | `99` | °C (iGPU-only, dGPU OFF) at/above which fans sit at `fanN_max`. |
 
 RPM is linearly interpolated between `fanN_min` and `fanN_max`, which are read
 dynamically from sysfs at startup. Disabled silently if applesmc is absent.
 
 When the dGPU is OFF (switchd, IGD topology) the nouveau hwmon disappears and
 the fan temperature becomes the CPU (`coretemp`) — which can safely run hotter
-than the dGPU, hence the separate quieter iGPU curve (defaults 41/91 °C, v5.1).
+than the dGPU, hence the separate quieter iGPU curve (defaults 33/99 °C, v5.1).
 With the dGPU ON the standard `temp-min`/`temp-max` (51/91 °C) curve applies.
 The curve is chosen by the dGPU **power state** (`sw.dgpu_off()`), not the
 topology.
@@ -591,8 +594,8 @@ topology.
 | `boost-pstate` | `-1` | Off-ladder boost tier, or `-1` to disable. Default disabled (`0e`/`0a` both stable, `0f` no visible gain on GT 750M). Set `0f` to opt in. |
 | `busy-boost` | `85` | % busy > → BOOST UP `0e→0f` after `boost-dwell`. |
 | `boost-dwell-ms` | `5000` | Sustained busy > `busy-boost` dwell to enter boost. |
-| `temp-down` | `82` | °C thermal down for preferred. |
-| `temp-up` | `75` | °C UP/BOOST allowed below this. |
+| `temp-down` | `85` | °C thermal down for preferred. |
+| `temp-up` | `65` | °C UP/BOOST allowed below this. |
 
 ### `[global]` section — common policy
 
@@ -629,8 +632,8 @@ supply the per-profile thermal thresholds.
 | `busy-enter` | `80` | Busy% sustained above → `0e` (with temp < `temp-up`). |
 | `busy-exit` | `40` | Busy% at/below → IDLE downshift counter (hysteresis 80/40). |
 | `temp-per-profile` | `true` | `true` = thermal thresholds from the focused profile; `false` = the common `temp-down`/`temp-up` below. |
-| `temp-down` | `82` | °C common thermal down (only when `temp-per-profile=false`). |
-| `temp-up` | `75` | °C common thermal up / `0e` entry margin (only when `temp-per-profile=false`). |
+| `temp-down` | `85` | °C common thermal down (only when `temp-per-profile=false`). |
+| `temp-up` | `65` | °C common thermal up / `0e` entry margin (only when `temp-per-profile=false`). |
 
 ```ini
 [dgpu-active]

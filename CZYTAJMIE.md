@@ -188,9 +188,9 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
   (dGPU OFF, topologia IGD), hwmon nouveau znika i wentylatorami steruje temp
   CPU (`coretemp`) — a CPU może się grzać bezpiecznie wyżej niż dGPU. Wchodzi
   wtedy osobna, cichsza krzywa: `temp-min-igd` / `temp-max-igd` (domyślnie
-  41/91 °C) — wiatraki lecą na max dopiero przy 91 °C zamiast 67 °C. Wybór
+  33/99 °C) — wiatraki lecą na max dopiero przy 99 °C zamiast 67 °C. Wybór
   krzywej wg **stanu power** dGPU (`sw.dgpu_off()`), nie topologii: OFF →
-  krzywa igd, ON → standardowa 51/91 °C. `pstate.sh status` ma dodatkową
+  krzywa igd, ON → standardowa 55/99 °C. `pstate.sh status` ma dodatkową
   sekcję `=== wentylatory ===` — aktywna krzywa + zakres + obroty z
   `/run/reclockd/status` (fallback do sysfs applesmc, gdy daemon nie działa).
 - 🔀 **Przeglądarki wymuszają dGPU (v5.2)**: klasy przeglądarek (`chromium`,
@@ -226,14 +226,14 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
   `min-switch-gap-ms` = 1000 ms.
 - 🌡 **Per-profil zabezpieczenie termiczne**: downclock termiczny jest
   **per-profil**, a nie globalny. `default` obniża taktowanie przy 65°C /
-  odzyskuje poniżej 58°C; `preferred` obniża przy 82°C / odzyskuje poniżej
-  75°C. Obniżenie termiczne ma priorytet nad obciążeniem (i nad
+  odzyskuje poniżej 58°C; `preferred` obniża przy 85°C / odzyskuje poniżej
+  65°C. Obniżenie termiczne ma priorytet nad obciążeniem (i nad
   title-priority) w obu profilach.
 - 🌀 **Kontrola wentylatorów (applesmc)**: na laptopach Apple `reclockd`
   steruje też wentylatorami SMC przez `/sys/devices/platform/applesmc.768/`.
   Krzywa temp→RPM jest interpolowana liniowo między `fanN_min` i `fanN_max`,
   które są **czytane dynamicznie z sysfs przy starcie** (nie hardkodowane).
-  Domyślny pas 51-91 °C, aktualizacja co cykl poll, niezależnie od pstate.
+  Domyślny pas 55-99 °C, aktualizacja co cykl poll, niezależnie od pstate.
   `reclockctl fan-off` zamraża auto (steruj wentylatorami ręcznie); `fan-on`
   wznawia. Fail-safe przywraca auto SMC (`manual=0`) przy wyjściu.
 - 🖥 **Synchronizacja vblank**: zapisy pstate są wyrównywane do vblank przez
@@ -454,6 +454,8 @@ które chcą **twardy** floor (np. `floor=0a` = nigdy `07`).
 [caps]
 # discord = floor=0a, max=0e, busy-up=50
 # chrome-discord.com__channels_@me-Default = floor=0a, max=0e, busy-up=50
+# v5.7: mpv — floor 0a (bez declocku do 07 podczas odtwarzania), busy-up 50
+mpv = floor=0a, max=0e, busy-up=50
 ```
 
 ### 🛡 Samouzdrawianie po suspend/resume (v4.5)
@@ -534,8 +536,9 @@ Sekcja `[switch]`:
 | `busy-enter` | `80` | busy% dla miękkiej promocji |
 | `busy-exit` | `40` | busy% dla demote |
 | `title-idle-busy` | `70` | v5.6: busy% poniżej którego karta Discord/YT (promocja tytułowa) jest 'idle' → demote do iGPU (power-off) po `dwell-out-ms`; reload przez SIGHUP |
-| `title-idle-hold-ms` | `30000` | v5.6: po demote karty Discord/YT trzymaj dGPU OFF przez ten czas przed ponowną promocją — zapobiega churnowi (grający YT na iGPU nie re-promuje co 3-4 s) |
-| `class-idle-busy` | `33` | v5.6: busy% poniżej którego klasa `[dgpu-idle]` (np. `mpv`) jest 'idle' → demote do iGPU (power-off) po `dwell-out-ms`; reload przez SIGHUP |
+| `title-idle-hold-ms` | `30000` | v5.6: po demote karty Discord/YT trzymaj dGPU OFF przez ten czas przed ponowną promocją. v5.7: re-promocja tytułowa tylko po zmianie tytułu/focusu — karta YT z busy < progu zostaje na iGPU na całe wideo (zero churnu); nowe wideo → re-promocja |
+| `class-idle-busy` | `33` | v5.6: busy% poniżej którego klasa `[dgpu-idle]` (np. `mpv`) jest 'idle' → demote do iGPU (power-off) po `dwell-out-ms`; reload przez SIGHUP. v5.7: + `cpu-temp-gate` — gorący CPU + zapas termalny dGPU → trzymaj dGPU mimo niskiego busy; pauza (busy < 5%) → demote zawsze |
+| `cpu-temp-gate` | `70` | v5.7: próg temp CPU (°C) dla demote klasy `[dgpu-idle]` (mpv). CPU gorętszy niż próg (robi coś innego, np. kompilacja) + dGPU poniżej `temp-gate` (zapas termalny) → mpv zostaje na dGPU. busy < 5% (pauza) → demote zawsze. `0` = wyłączony; reload przez SIGHUP |
 | `pstate-settle-ms` | `10000` | nie pisz pstate po power-on — settle zegara GPU po D3hot→D0 (pierwsza zmiana clocka potrafi zawiesić workqueue nouveau) |
 | `pstate-write-timeout-ms` | `2000` | zapis pstate w osobnym wątku; po timeoutcie daemon żyje dalej i wstrzymuje zapisy pstate |
 
@@ -557,7 +560,12 @@ Co promuje / demote'uje:
   neutralne).
 - `[dgpu-idle]` — klasy, które promują do dGPU jak twarde, ale demote'ują do
   iGPU, gdy busy < `class-idle-busy` (default 33%): `mpv` (wideo na dGPU,
-  pauza/idle na iGPU).
+  pauza/idle na iGPU). v5.7: `cpu-temp-gate` trzyma dGPU gdy CPU jest gorący
+  a dGPU ma zapas termalny (brak churnu demote, gdy przy grającym wideo leci
+  build); po demote re-promocja wymaga zmiany tytułu/focusu (lub wejścia CPU
+  w gorący zakres) + hold `title-idle-hold-ms` — bez churnu przy pauzie.
+  Wpis `[caps]` `mpv = floor=0a, max=0e, busy-up=50` trzyma mpv na dGPU co
+  najmniej na 0a (bez declocku do 07 podczas odtwarzania).
 - `[dgpu-soft]` — klasy z miękką promocją busy-gated (na start puste).
 - `[igpu]` — klasy zawsze na iGPU (democja): `foot`, `kitty`, `alacritty`.
 - `[dgpu-procs]` — nazwy procesów (skan `/proc/*/comm`) wymagające dGPU:
@@ -580,18 +588,18 @@ apka preferred generuje obciążenie w tle.
 | Klucz | Domyślnie | Znaczenie |
 |---|---|---|
 | `enable` | `true` | Włącz kontrolę wentylatorów applesmc. |
-| `temp-min` | `51` | °C, przy/poniżej którego wentylatory siedzą na `fanN_min`. |
-| `temp-max` | `91` | °C, przy/powyżej którego wentylatory siedzą na `fanN_max`. |
-| `temp-min-igd` | `41` | °C (tylko-iGPU, dGPU OFF), przy/poniżej którego wentylatory siedzą na `fanN_min`. |
-| `temp-max-igd` | `91` | °C (tylko-iGPU, dGPU OFF), przy/powyżej którego wentylatory siedzą na `fanN_max`. |
+| `temp-min` | `55` | °C, przy/poniżej którego wentylatory siedzą na `fanN_min`. |
+| `temp-max` | `99` | °C, przy/powyżej którego wentylatory siedzą na `fanN_max`. |
+| `temp-min-igd` | `33` | °C (tylko-iGPU, dGPU OFF), przy/poniżej którego wentylatory siedzą na `fanN_min`. |
+| `temp-max-igd` | `99` | °C (tylko-iGPU, dGPU OFF), przy/powyżej którego wentylatory siedzą na `fanN_max`. |
 
 RPM jest interpolowany liniowo między `fanN_min` i `fanN_max`, czytanymi
 dynamicznie z sysfs przy starcie. Wyłączane cicho, gdy applesmc nie istnieje.
 
 Gdy dGPU jest OFF (switchd, topologia IGD), hwmon nouveau znika i temp dla
 wentylatorów = CPU (`coretemp`) — CPU może się grzać bezpiecznie wyżej niż
-dGPU, stąd osobna, cichsza krzywa igd (domyślnie 41/91 °C, v5.1). Przy dGPU
-ON działa standardowa krzywa `temp-min`/`temp-max` (51/91 °C). Wybór krzywej
+dGPU, stąd osobna, cichsza krzywa igd (domyślnie 33/99 °C, v5.1). Przy dGPU
+ON działa standardowa krzywa `temp-min`/`temp-max` (55/99 °C). Wybór krzywej
 wg **stanu power** dGPU (`sw.dgpu_off()`), nie topologii.
 
 ### `[profile default]` — aplikacje nie-preferred (terminal/edytor)
@@ -610,8 +618,8 @@ wg **stanu power** dGPU (`sw.dgpu_off()`), nie topologii.
 | `boost-pstate` | `-1` | Tier boost poza drabiną, lub `-1` by wyłączyć. Domyślnie wyłączony (`0e`/`0a` oba stabilne, `0f` bez widocznego zysku na GT 750M). Ustaw `0f`, by włączyć. |
 | `busy-boost` | `85` | % busy > → BOOST UP `0e→0f` po `boost-dwell`. |
 | `boost-dwell-ms` | `5000` | Dwell utrzymanego busy > `busy-boost` do wejścia w boost. |
-| `temp-down` | `82` | °C thermal down dla preferred. |
-| `temp-up` | `75` | °C UP/BOOST dozwolone poniżej tego. |
+| `temp-down` | `85` | °C thermal down dla preferred. |
+| `temp-up` | `65` | °C UP/BOOST dozwolone poniżej tego. |
 
 ### Sekcja `[global]` — wspólna polityka
 
@@ -648,8 +656,8 @@ dostarczają per-profilowych progów termalnych.
 | `busy-enter` | `80` | % busy sustained powyżej → `0e` (z temp < `temp-up`). |
 | `busy-exit` | `40` | % busy na/poniżej → licznik IDLE downshift (histereza 80/40). |
 | `temp-per-profile` | `true` | `true` = progi termalne z profilu focusa; `false` = wspólne `temp-down`/`temp-up` poniżej. |
-| `temp-down` | `82` | °C wspólne termalne DOWN (tylko gdy `temp-per-profile=false`). |
-| `temp-up` | `75` | °C wspólne termalne UP / margines wejścia `0e` (tylko gdy `temp-per-profile=false`). |
+| `temp-down` | `85` | °C wspólne termalne DOWN (tylko gdy `temp-per-profile=false`). |
+| `temp-up` | `65` | °C wspólne termalne UP / margines wejścia `0e` (tylko gdy `temp-per-profile=false`). |
 
 ```ini
 [dgpu-active]

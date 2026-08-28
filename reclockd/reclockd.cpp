@@ -182,6 +182,20 @@
 //      po 1 s (niezależnie od busy — downclock do 07 robi [dgpu-active]).
 //      Timery switch skrócone: min-residence/dwell-out/cooldown/min-switch-gap
 //      = 1000 ms. [dgpu-active] bez zmian.
+//
+// v5.7 (2026-08-28):
+//   T. CPU-TEMP-GATE: klasa [dgpu-idle] (mpv) NIE demotuje gdy CPU
+//      jest gorący (robi coś innego — np. kompilacja) a dGPU ma zapas termalny
+//      (cpu >= cpu-temp-gate [switch], default 70°C; dGPU < temp-gate). busy
+//      < 5% (pauza) → demote ZAWSZE. Klucz [switch] cpu-temp-gate (0 = off).
+//   U. RE-PROMOCJA PO ZMIANIE TYTUŁU/FOCUSU: po demote klasy tytułowej (YT/
+//      Discord) i [dgpu-idle] (mpv) dGPU wraca TYLKO gdy zmienił się tytuł okna
+//      lub klasa focusa (nowe wideo/kanał), z holdem title-idle-hold-ms —
+//      karta z busy < progu zostaje na iGPU na cały okres tego samego tytułu
+//      (zero churnu). Dla [dgpu-idle] dodatkowa re-promocja gdy CPU wszedł w
+//      gorący zakres (wznowienie wideo po pauzie).
+//   V. [caps] mpv: floor=0a, max=0e, busy-up=50 — na dGPU mpv nie declockuje
+//      poniżej 0a podczas odtwarzania.
 
 #include <algorithm>
 #include <atomic>
@@ -398,6 +412,12 @@ struct Config {
         // → demote do iGPU (power-off) po dwell-out. Konfigurowalne w [switch]
         // (class-idle-busy), reload przez SIGHUP.
         int  class_idle_busy = 33;
+        // v5.7: próg temp CPU (°C) dla demote klasy [dgpu-idle] (mpv). CPU
+        // gorętszy niż próg (robi coś innego — np. kompilacja) + dGPU poniżej
+        // temp-gate (ma zapas termalny) → mpv zostaje na dGPU. busy < 5%
+        // (pauza) → demote zawsze. 0 = wyłączony. Konfigurowalne w [switch]
+        // (cpu-temp-gate), reload przez SIGHUP.
+        int  cpu_temp_gate = 70;
         // v5.6: tytuły Discord/YouTube (kopiowane z [preferred-titles] w parserze)
         // — promocja tytułowa karty w przeglądarce, NIE zapinka (idle-release).
         std::set<std::string> preferred_titles;
@@ -693,6 +713,8 @@ static bool load_config(const std::string& path, Config& cfg)
             else if (keys == "title-idle-busy")   cfg.sw.title_idle_busy   = parse_int(vals);
             else if (keys == "title-idle-hold-ms") cfg.sw.title_idle_hold_ms = parse_int(vals);
             else if (keys == "class-idle-busy")  cfg.sw.class_idle_busy   = parse_int(vals);
+            // v5.7: cpu-temp-gate — próg temp CPU (°C) dla demote [dgpu-idle].
+            else if (keys == "cpu-temp-gate")    cfg.sw.cpu_temp_gate     = parse_int(vals);
             continue;
         }
         // v5.0: sekcja [dpower] — backend power dGPU.
@@ -820,6 +842,8 @@ static bool load_config(const std::string& path, Config& cfg)
     if (cfg.sw.title_idle_hold_ms < 1000) cfg.sw.title_idle_hold_ms = 30000;
     // v5.6: sanity class-idle-busy — % busy, clamp [0,100]; błędna wartość → 33.
     if (cfg.sw.class_idle_busy < 0 || cfg.sw.class_idle_busy > 100) cfg.sw.class_idle_busy = 33;
+    // v5.7: sanity cpu-temp-gate — °C clamp [0,100]; 0 = wyłączony; błędna → 70.
+    if (cfg.sw.cpu_temp_gate < 0 || cfg.sw.cpu_temp_gate > 100) cfg.sw.cpu_temp_gate = 70;
     // v5.4: sanity [dgpu-active]. Stany muszą być znane (07/0a/0e/0f) i
     // baseline <= max. Progi busy clamp do [0,100]. activity-source: tylko
     // "evdev" daje sygnał inputu; "none"/"cursorpos" → brak (idle po dwell).
@@ -1933,7 +1957,9 @@ public:
         std::string focused_title;
         std::vector<std::string> consumers;   // dgpu_consumers() — comm nazwy
         uint32_t busy = 0;                    // ‰ (g_last_busy)
-        int temp = -1;                        // °C
+        int temp = -1;                        // °C (dGPU hwmon nouveau)
+        // v5.7: temp CPU (coretemp) — cpu-temp-gate dla [dgpu-idle]; -1 gdy brak.
+        int cpu_temp = -1;                    // °C
         bool external_display = false;
     };
 
@@ -2001,14 +2027,46 @@ public:
             // demote). Gdy dGPU OFF (busy_known=false) → promuj jak twarda
             // (busy nieznane ≠ idle — to samo zabezpieczenie co title_promo).
             bool idle_now = idle_class && busy_known && (int)in.busy < cfg.class_idle_busy * 10;
+            if (idle_now) {
+                // v5.7: cpu-temp-gate — CPU gorący (robi coś innego, np.
+                // kompilacja) a dGPU ma zapas termalny → trzymaj dGPU.
+                // busy < 5% (pauza) → demote zawsze.
+                bool cpu_hot  = in.cpu_temp >= 0 && in.cpu_temp >= cfg.cpu_temp_gate;
+                bool dgpu_hot = in.temp >= 0 && in.temp >= cfg.temp_gate;
+                bool truly_idle = (int)in.busy < 50;
+                if (cpu_hot && !dgpu_hot && !truly_idle) {
+                    idle_now = false;
+                    if (!gate_logged_) {
+                        gate_logged_ = true;
+                        logf(1, "switch: cpu-temp-gate — CPU %d°C >= %d°C, "
+                                "dGPU %d°C < %d°C: trzymam dGPU (klasa %s, busy %d%%)",
+                             in.cpu_temp, cfg.cpu_temp_gate, in.temp, cfg.temp_gate,
+                             in.focused_class.c_str(), (int)in.busy / 10);
+                    }
+                }
+            }
             if (!idle_now) {
                 if (thermal_ok) {
-                    if (target_ != DGPU && since(last_demote_) < cfg.cooldown_ms) {
-                        // cooldown — czekaj
-                    } else {
-                        if (target_ != DGPU) last_promote_ = now;
-                        target_ = DGPU;
+                    if (target_ != DGPU) {
+                        // v5.7: po demote klasy [dgpu-idle] re-promocja tylko
+                        // gdy zmienił się tytuł/focus LUB CPU wszedł w gorący
+                        // zakres (wznowienie wideo po pauzie), z holdem jak
+                        // przy tytułach — bez churnu przy pauzie. Dla innych
+                        // klas twardych: cooldown jak dotychczas.
+                        bool changed = in.focused_title != last_demote_title_ ||
+                                       in.focused_class != last_demote_class_;
+                        bool cpu_hot_now = in.cpu_temp >= 0 &&
+                                           in.cpu_temp >= cfg.cpu_temp_gate;
+                        bool cpu_rise = cpu_hot_now && !last_demote_cpu_hot_;
+                        bool ok = idle_class
+                            ? (changed || cpu_rise) &&
+                              since(last_demote_) >= cfg.title_idle_hold_ms
+                            : since(last_demote_) >= cfg.cooldown_ms;
+                        if (!ok)
+                            return target_;
+                        last_promote_ = now;
                     }
+                    target_ = DGPU;
                 }
                 // !thermal_ok: nie promuj; trzymaj dGPU jeśli już włączony.
                 return target_;
@@ -2022,8 +2080,13 @@ public:
         // (anti-flapping). dwell_out_ zerowany póki aktywna → demote nie tyka.
         if (title_promo && !idle_title) {
             dwell_out_ = 0;
-            // v5.6: hold-off po demote — YT na iGPU bez churnu
-            if (target_ != DGPU && thermal_ok &&
+            // v5.7: re-promocja tylko po zmianie tytułu/focusu — karta YT/
+            // Discord z busy poniżej progu zostaje na iGPU na cały okres tego
+            // samego tytułu (zero churnu); nowe wideo/kanał (tytuł się zmienia)
+            // → re-promocja, hold nadal rate-limit'uje.
+            bool changed = in.focused_title != last_demote_title_ ||
+                           in.focused_class != last_demote_class_;
+            if (target_ != DGPU && thermal_ok && changed &&
                 since(last_demote_) >= cfg.title_idle_hold_ms) {
                 last_promote_ = now;
                 target_ = DGPU;
@@ -2049,6 +2112,15 @@ public:
             dwell_out_ >= cfg.dwell_out_ms) {
             target_ = IGPU;
             last_demote_ = now;
+            // v5.7: zapamiętaj kontekst demote — re-promocja (tytułowa i
+            // [dgpu-idle]) tylko po zmianie tytułu/focusu lub wejściu CPU w
+            // gorący zakres. Wpis przy cpu_temp_gate=0: cpu_hot zawsze true →
+            // demote tylko przy busy<5%, re-promocja tylko po zmianie tytułu.
+            last_demote_title_ = in.focused_title;
+            last_demote_class_ = in.focused_class;
+            last_demote_cpu_hot_ = (in.cpu_temp >= 0 &&
+                                    in.cpu_temp >= cfg.cpu_temp_gate);
+            gate_logged_ = false;   // v5.7: reset jednorazowego logu gate'a
             dwell_out_ = 0;
         }
 
@@ -2061,6 +2133,15 @@ private:
     Target target_ = IGPU;
     int dwell_in_ = 0, dwell_out_ = 0;
     std::chrono::steady_clock::time_point last_promote_{}, last_demote_{};
+    // v5.7: kontekst ostatniego demote — re-promocja (tytułowa i [dgpu-idle])
+    // tylko po zmianie tytułu/focusu (zero churnu YT/mpv) lub wejściu CPU w
+    // gorący zakres. Stan polityki — MUSI przetrwać SIGHUP (nie w Config).
+    std::string last_demote_title_;
+    std::string last_demote_class_;
+    bool last_demote_cpu_hot_ = false;
+    // v5.7: jednorazowy log gdy cpu-temp-gate pierwszy raz blokuje demote
+    // klasy [dgpu-idle] (bez per-tick spamów); reset przy demote.
+    bool gate_logged_ = false;
 };
 
 // ----------------------------------------------------------- switchd: status
@@ -2229,7 +2310,8 @@ public:
              nvram_prefs_.c_str(), cfg_.backend.c_str(), target_name());
     }
 
-    void tick(HyprCtl& hypr, int temp, uint32_t last_busy)
+    // v5.7: cpu_temp — temp CPU (coretemp, °C, -1 gdy brak) dla cpu-temp-gate.
+    void tick(HyprCtl& hypr, int temp, uint32_t last_busy, int cpu_temp)
     {
         // Własne hyprctl (activewindow) — niezależne od pollingu pstate.
         // v5.6: tytuł okna przekazywany do polityki — promocja tytułowa
@@ -2264,6 +2346,7 @@ public:
             in.consumers = dgpu_consumers();
             in.busy = last_busy;
             in.temp = temp;
+            in.cpu_temp = cpu_temp;
             in.external_display = external_display_on_dgpu();
 
             target_ = policy_.decide(in, cfg_, cfg_.tick_ms);
@@ -2640,7 +2723,7 @@ private:
 static void usage(const char* argv0)
 {
     std::printf(
-        "reclockd v5.6 — polityka profilowa (app-aware) + wentylatory + switchd + [dgpu-active] + switchd tune + override + reload + nvram cache\n"
+        "reclockd v5.7 — polityka profilowa (app-aware) + wentylatory + switchd + [dgpu-active] + switchd tune + override + reload + nvram cache\n"
         "Użycie: %s [opcje]\n"
         "  switchd (v5.0): dGPU power-state + render routing. W DIS = monitor\n"
         "    (zero zmian power). Sekcje [switch]/[dpower]/[dgpu-hard]/[dgpu-soft]\n"
@@ -2965,7 +3048,7 @@ int main(int argc, char** argv)
                           " evdev=" + std::to_string(input.device_count()) + " urz.";
     }
 
-    logf(1, "start v5.6: interval=%dms poll=%dms, "
+    logf(1, "start v5.7: interval=%dms poll=%dms, "
             "default[cap=%s temp-up=%d temp-down=%d], "
             "preferred[cap=%s boost=%s busy-boost=%d%% boost-dwell=%dms "
             "temp-up=%d temp-down=%d], "
@@ -3038,8 +3121,9 @@ int main(int argc, char** argv)
 
         // v5.0: switchd tick (co poll_cycles) — ZAWSZE, niezależnie od stanu dGPU.
         // Własne hyprctl (activewindow) + g_last_busy + temp.
+        // v5.7: + hw.read_cpu_temp() (coretemp, -1 gdy brak) — cpu-temp-gate.
         if (sw.enabled() && (cycle % poll_cycles) == 0)
-            sw.tick(hypr, temp, g_last_busy);
+            sw.tick(hypr, temp, g_last_busy, hw.read_cpu_temp());
 
         // v5.0: fan block (co poll_cycles) — PRZENIESIONY przed gate (działa też
         // gdy dGPU OFF; temp=-1 gdy hwmon nouveau zniknął → krzywa min, compiler
