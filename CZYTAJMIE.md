@@ -187,10 +187,11 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
 - 🌬 **Osobna krzywa fan tylko-iGPU (v5.1)**: gdy aktywne jest tylko iGPU
   (dGPU OFF, topologia IGD), hwmon nouveau znika i wentylatorami steruje temp
   CPU (`coretemp`) — a CPU może się grzać bezpiecznie wyżej niż dGPU. Wchodzi
-  wtedy osobna, cichsza krzywa: `temp-min-igd` / `temp-max-igd` (domyślnie
-  33/99 °C) — wiatraki lecą na max dopiero przy 99 °C zamiast 67 °C. Wybór
-  krzywej wg **stanu power** dGPU (`sw.dgpu_off()`), nie topologii: OFF →
-  krzywa igd, ON → standardowa 55/99 °C. `pstate.sh status` ma dodatkową
+  wtedy osobna, cichsza krzywa: `temp-min-igd` / `temp-mid-igd` / `temp-max-igd`
+  (domyślnie 33-80-90 °C, 3-punktowa, v5.9) — wiatraki lecą na max dopiero
+  przy 90 °C zamiast 67 °C. Wybór krzywej wg **stanu power** dGPU
+  (`sw.dgpu_off()`), nie topologii: OFF → krzywa igd, ON → standardowa
+  55-80-90 °C (3-punktowa). `pstate.sh status` ma dodatkową
   sekcję `=== wentylatory ===` — aktywna krzywa + zakres + obroty z
   `/run/reclockd/status` (fallback do sysfs applesmc, gdy daemon nie działa).
 - 🔀 **Przeglądarki wymuszają dGPU (v5.2)**: klasy przeglądarek (`chromium`,
@@ -231,9 +232,11 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
   title-priority) w obu profilach.
 - 🌀 **Kontrola wentylatorów (applesmc)**: na laptopach Apple `reclockd`
   steruje też wentylatorami SMC przez `/sys/devices/platform/applesmc.768/`.
-  Krzywa temp→RPM jest interpolowana liniowo między `fanN_min` i `fanN_max`,
-  które są **czytane dynamicznie z sysfs przy starcie** (nie hardkodowane).
-  Domyślny pas 55-99 °C, aktualizacja co cykl poll, niezależnie od pstate.
+  Krzywa temp→RPM jest interpolowana dwuodcinkowo (v5.9) między `fanN_min`
+  i `fanN_max`, które są **czytane dynamicznie z sysfs przy starcie** (nie
+  hardkodowane): `temp-min` → `temp-mid` przy `fan-mid`% zakresu RPM, potem
+  stromo do 100% przy `temp-max`. Domyślny pas 55-80-90 °C (3-punktowy),
+  aktualizacja co cykl poll, niezależnie od pstate.
   `reclockctl fan-off` zamraża auto (steruj wentylatorami ręcznie); `fan-on`
   wznawia. Fail-safe przywraca auto SMC (`manual=0`) przy wyjściu.
 - 🖥 **Synchronizacja vblank**: zapisy pstate są wyrównywane do vblank przez
@@ -539,6 +542,7 @@ Sekcja `[switch]`:
 | `title-idle-hold-ms` | `30000` | v5.6: po demote karty Discord/YT trzymaj dGPU OFF przez ten czas przed ponowną promocją. v5.7: re-promocja tytułowa tylko po zmianie tytułu/focusu — karta YT z busy < progu zostaje na iGPU na całe wideo (zero churnu); nowe wideo → re-promocja |
 | `class-idle-busy` | `33` | v5.6: busy% poniżej którego klasa `[dgpu-idle]` (np. `mpv`) jest 'idle' → demote do iGPU (power-off) po `dwell-out-ms`; reload przez SIGHUP. v5.7: + `cpu-temp-gate` — gorący CPU + zapas termalny dGPU → trzymaj dGPU mimo niskiego busy; pauza (busy < 5%) → demote zawsze |
 | `cpu-temp-gate` | `70` | v5.7: próg temp CPU (°C) dla demote klasy `[dgpu-idle]` (mpv). CPU gorętszy niż próg (robi coś innego, np. kompilacja) + dGPU poniżej `temp-gate` (zapas termalny) → mpv zostaje na dGPU. busy < 5% (pauza) → demote zawsze. `0` = wyłączony; reload przez SIGHUP |
+| `cpu-temp-promote` | `80` | v5.9: próg temp CPU (°C) dla termicznego odciążania kart tytułowych (YT/Discord): CPU ≥ próg → re-promocja do dGPU bez zmiany tytułu/focusu + demote zablokowany (dGPU poniżej `temp-gate`, busy ≥ 5%) — dGPU przejmuje render, CPU się chłodzi. `0` = wyłączony; reload przez SIGHUP; guard: escape busy<5% dopiero po pstate-settle-ms od promocji |
 | `pstate-settle-ms` | `10000` | nie pisz pstate po power-on — settle zegara GPU po D3hot→D0 (pierwsza zmiana clocka potrafi zawiesić workqueue nouveau) |
 | `pstate-write-timeout-ms` | `2000` | zapis pstate w osobnym wątku; po timeoutcie daemon żyje dalej i wstrzymuje zapisy pstate |
 
@@ -589,18 +593,26 @@ apka preferred generuje obciążenie w tle.
 |---|---|---|
 | `enable` | `true` | Włącz kontrolę wentylatorów applesmc. |
 | `temp-min` | `55` | °C, przy/poniżej którego wentylatory siedzą na `fanN_min`. |
-| `temp-max` | `99` | °C, przy/powyżej którego wentylatory siedzą na `fanN_max`. |
+| `temp-mid` | `80` | v5.9: °C punkt przegięcia — wentylatory na `fan-mid`% zakresu RPM; powyżej krzywa idzie stromo do max. `0` (lub poza zakresem) → legacy liniowa. |
+| `fan-mid` | `60` | v5.9: % zakresu RPM wentylatorów przy `temp-mid` (krzywa standardowa). |
+| `temp-max` | `90` | °C, przy/powyżej którego wentylatory siedzą na `fanN_max`. |
 | `temp-min-igd` | `33` | °C (tylko-iGPU, dGPU OFF), przy/poniżej którego wentylatory siedzą na `fanN_min`. |
-| `temp-max-igd` | `99` | °C (tylko-iGPU, dGPU OFF), przy/powyżej którego wentylatory siedzą na `fanN_max`. |
+| `temp-mid-igd` | `80` | v5.9: °C punkt przegięcia (krzywa tylko-iGPU). |
+| `fan-mid-igd` | `70` | v5.9: % zakresu RPM wentylatorów przy `temp-mid-igd`. |
+| `temp-max-igd` | `90` | °C (tylko-iGPU, dGPU OFF), przy/powyżej którego wentylatory siedzą na `fanN_max`. |
 
-RPM jest interpolowany liniowo między `fanN_min` i `fanN_max`, czytanymi
-dynamicznie z sysfs przy starcie. Wyłączane cicho, gdy applesmc nie istnieje.
+RPM jest interpolowany dwuodcinkowo (v5.9) między `fanN_min` i `fanN_max`,
+czytanymi dynamicznie z sysfs przy starcie: `temp-min` → `temp-mid` przy
+`fan-mid`% zakresu RPM, potem stromo do 100% przy `temp-max`. `temp-mid = 0`
+(lub poza zakresem) → legacy liniowa 1:1. Wyłączane cicho, gdy applesmc nie
+istnieje.
 
 Gdy dGPU jest OFF (switchd, topologia IGD), hwmon nouveau znika i temp dla
 wentylatorów = CPU (`coretemp`) — CPU może się grzać bezpiecznie wyżej niż
-dGPU, stąd osobna, cichsza krzywa igd (domyślnie 33/99 °C, v5.1). Przy dGPU
-ON działa standardowa krzywa `temp-min`/`temp-max` (55/99 °C). Wybór krzywej
-wg **stanu power** dGPU (`sw.dgpu_off()`), nie topologii.
+dGPU, stąd osobna, cichsza krzywa igd (domyślnie 33-80-90 °C, 3-punktowa,
+v5.1). Przy dGPU ON działa standardowa krzywa `temp-min`/`temp-mid`/`temp-max`
+(55-80-90 °C, 3-punktowa). Wybór krzywej wg **stanu power** dGPU
+(`sw.dgpu_off()`), nie topologii.
 
 ### `[profile default]` — aplikacje nie-preferred (terminal/edytor)
 

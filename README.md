@@ -178,10 +178,11 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
 - 🌬 **iGPU-only fan curve (v5.1)**: with only the iGPU active (dGPU OFF in
   IGD topology) the nouveau hwmon disappears, so the fan driver reads the CPU
   (`coretemp`) temperature — which can safely run hotter than the dGPU. A
-  separate, quieter curve applies: `temp-min-igd` / `temp-max-igd` (defaults
-  33/99 °C) — fans hit max at 99 °C instead of 67 °C. The curve is chosen by
-  the dGPU **power state** (`sw.dgpu_off()`), not the topology: OFF → iGPU
-  curve, ON → the standard 55/99 °C. `pstate.sh status` now also prints an
+  separate, quieter curve applies: `temp-min-igd` / `temp-mid-igd` /
+  `temp-max-igd` (defaults 33-80-90 °C, 3-point, v5.9) — fans hit max at
+  90 °C instead of 67 °C. The curve is chosen by the dGPU **power state**
+  (`sw.dgpu_off()`), not the topology: OFF → iGPU curve, ON → the standard
+  55-80-90 °C (3-point). `pstate.sh status` now also prints an
   `=== wentylatory ===` section — the active curve + range + RPMs from
   `/run/reclockd/status` (applesmc sysfs fallback when the daemon is down).
 - 🔀 **Browsers force the dGPU on (v5.2)**: browser classes (`chromium`,
@@ -219,10 +220,12 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   throttles at 85°C / recovers below 65°C. Thermal down is prioritized over
   load (and over title-priority) in both profiles.
 - 🌀 **Fan control (applesmc)**: on Apple laptops, `reclockd` also drives the
-  SMC fans via `/sys/devices/platform/applesmc.768/`. A linear temp→RPM curve
-  is interpolated between `fanN_min` and `fanN_max`, which are **read
-  dynamically from sysfs at startup** (not hardcoded). Default band 55-99 °C,
-  updated every poll cycle, independent of pstate. `reclockctl fan-off`
+  SMC fans via `/sys/devices/platform/applesmc.768/`. A two-segment temp→RPM
+  curve (v5.9) is interpolated between `fanN_min` and `fanN_max`, which are
+  **read dynamically from sysfs at startup** (not hardcoded): `temp-min` →
+  `temp-mid` at `fan-mid`% of the RPM range, then steeply to 100% at
+  `temp-max`. Default band 55-80-90 °C (3-point), updated every poll cycle,
+  independent of pstate. `reclockctl fan-off`
   freezes auto (drive fans manually); `fan-on` resumes. Fail-safe restores SMC
   auto (`manual=0`) on exit.
 - 🖥 **vblank sync**: pstate writes are aligned to vblank via
@@ -521,6 +524,7 @@ is out of scope for the gmux.
 | `title-idle-hold-ms` | `30000` | v5.6: after demoting a Discord/YouTube card, keep the dGPU OFF for this long before re-promoting. v5.7: title re-promotion only after a title/focus change — a YT tab with busy below the threshold stays on the iGPU for the whole video (zero churn); a new video → re-promotion |
 | `class-idle-busy` | `33` | v5.6: busy% below which a `[dgpu-idle]` class (e.g. `mpv`) is 'idle' → demote to iGPU (power-off) after `dwell-out-ms`; SIGHUP-reloadable. v5.7: + `cpu-temp-gate` — a hot CPU + dGPU thermal headroom keeps the dGPU despite low busy; pause (busy < 5%) always demotes |
 | `cpu-temp-gate` | `70` | v5.7: CPU temp (°C) threshold for `[dgpu-idle]` (mpv) demote. CPU hotter than the threshold (doing something else, e.g. compiling) + dGPU below `temp-gate` (thermal headroom) → mpv stays on the dGPU. busy < 5% (pause) → always demote. `0` = disabled; SIGHUP-reloadable |
+| `cpu-temp-promote` | `80` | v5.9: CPU temp (°C) threshold for thermal offload of title cards (YT/Discord): CPU ≥ threshold → re-promotion to the dGPU without a title/focus change + demote blocked (dGPU below `temp-gate`, busy ≥ 5%) — the dGPU takes over rendering, the CPU cools down. `0` = disabled; SIGHUP-reloadable; guard: busy<5% escape only after pstate-settle-ms from promotion |
 | `pstate-settle-ms` | `10000` | don't write pstate after power-on — GPU clock settle after D3hot→D0 (the first clock change can hang the nouveau workqueue) |
 | `pstate-write-timeout-ms` | `2000` | pstate write runs in a separate thread; on timeout the daemon stays alive and pauses pstate writes |
 
@@ -564,17 +568,25 @@ preferred app is busy in the background.
 |---|---|---|
 | `enable` | `true` | Enable applesmc fan control. |
 | `temp-min` | `55` | °C at/below which fans sit at `fanN_min`. |
-| `temp-max` | `99` | °C at/above which fans sit at `fanN_max`. |
+| `temp-mid` | `80` | v5.9: °C inflection point — fans at `fan-mid`% of the RPM range; above it the curve ramps steeply to max. `0` (or outside the range) → legacy linear. |
+| `fan-mid` | `60` | v5.9: % of the fan RPM range applied at `temp-mid` (standard curve). |
+| `temp-max` | `90` | °C at/above which fans sit at `fanN_max`. |
 | `temp-min-igd` | `33` | °C (iGPU-only, dGPU OFF) at/below which fans sit at `fanN_min`. |
-| `temp-max-igd` | `99` | °C (iGPU-only, dGPU OFF) at/above which fans sit at `fanN_max`. |
+| `temp-mid-igd` | `80` | v5.9: °C inflection point (iGPU-only curve). |
+| `fan-mid-igd` | `70` | v5.9: % of the fan RPM range applied at `temp-mid-igd`. |
+| `temp-max-igd` | `90` | °C (iGPU-only, dGPU OFF) at/above which fans sit at `fanN_max`. |
 
-RPM is linearly interpolated between `fanN_min` and `fanN_max`, which are read
-dynamically from sysfs at startup. Disabled silently if applesmc is absent.
+RPM is interpolated in two segments (v5.9) between `fanN_min` and `fanN_max`
+(read dynamically from sysfs at startup): `temp-min` → `temp-mid` at
+`fan-mid`% of the RPM range, then steeply to 100% at `temp-max`. `temp-mid = 0`
+(or outside the range) → legacy linear 1:1 curve. Disabled silently if
+applesmc is absent.
 
 When the dGPU is OFF (switchd, IGD topology) the nouveau hwmon disappears and
 the fan temperature becomes the CPU (`coretemp`) — which can safely run hotter
-than the dGPU, hence the separate quieter iGPU curve (defaults 33/99 °C, v5.1).
-With the dGPU ON the standard `temp-min`/`temp-max` (51/91 °C) curve applies.
+than the dGPU, hence the separate quieter iGPU curve (defaults 33-80-90 °C,
+3-point, v5.1). With the dGPU ON the standard `temp-min`/`temp-mid`/`temp-max`
+(55-80-90 °C, 3-point) curve applies.
 The curve is chosen by the dGPU **power state** (`sw.dgpu_off()`), not the
 topology.
 

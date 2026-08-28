@@ -183,6 +183,21 @@
 //      Timery switch skrócone: min-residence/dwell-out/cooldown/min-switch-gap
 //      = 1000 ms. [dgpu-active] bez zmian.
 //
+// v5.9 (2026-08-28):
+//   X. KRZYWA FAN 3-PUNKTOWA: [fan] temp-mid/fan-mid + temp-mid-igd/fan-mid-igd —
+//      interpolacja dwuodcinkowa (% zakresu RPM), po temp-mid stromo do max.
+//      temp-max 99→90: pełne obroty przy 90°C. mid=0 → legacy liniowa.
+//   Y. CPU-TEMP-PROMOTE: [switch] cpu-temp-promote=80 — karta tytułowa (YT/
+//      Discord): CPU ≥ próg → re-promocja bez zmiany tytułu + demote zablokowany
+//      (dGPU < temp-gate, busy ≥ 5%) — odciążenie CPU przy wysokiej temperaturze.
+//      Guard: escape busy<5% dopiero po pstate-settle-ms od promocji (busy po
+//      power-onie niewiarygodny — bez churnu przy CPU ≥ progu).
+//
+// v5.8 (2026-08-28):
+//   W. TESTY POZA BOOSTEM KOMPILATORA: procesy testowe — cmake -P LaunchTest.cmake
+//      (CTest/GoogleTest), ctest, "make test"/"make check" — NIE liczą się jako
+//      kompilator (boost wentylatorów tylko przy faktycznej kompilacji).
+//
 // v5.7 (2026-08-28):
 //   T. CPU-TEMP-GATE: klasa [dgpu-idle] (mpv) NIE demotuje gdy CPU
 //      jest gorący (robi coś innego — np. kompilacja) a dGPU ma zapas termalny
@@ -375,6 +390,14 @@ struct Config {
     // wejdą na max. Wybór w pętli: sw.dgpu_off() → krzywa igd, inaczej standardowa.
     int  fan_temp_min_igd = 41;   // °C → min RPM (tryb tylko-iGPU)
     int  fan_temp_max_igd = 91;   // °C → max RPM (tryb tylko-iGPU)
+    // v5.9: 3-punktowa krzywa — punkt przegięcia temp-mid + % zakresu RPM przy
+    // nim. Dwuodcinkowa interpolacja: temp-min→temp-mid (0→fan-mid%), temp-mid
+    // →temp-max (fan-mid%→100%, stromo). mid=0 (lub poza zakresem) → legacy
+    // liniowa temp-min→temp-max (jak dotychczas). Osobne wartości dla igd.
+    int  fan_temp_mid   = 0;      // °C punkt przegięcia (dga; 0 = wyłączony)
+    int  fan_mid        = 0;      // % zakresu RPM przy temp-mid (dga; 0 = wyłączony)
+    int  fan_temp_mid_igd = 0;    // °C punkt przegięcia (tylko-iGPU; 0 = wyłączony)
+    int  fan_mid_igd    = 0;      // % zakresu RPM przy temp-mid (tylko-iGPU; 0 = wył.)
     // v4.6: sekcja [compiler] — boost wentylatorów gdy wykryty kompilator
     // (skan /proc/*/comm z fallbackiem na cmdline). fan_max = % maksymalnych
     // RPM (100 = pełne wiatraki). names = dodatkowe nazwy do wykrycia (przecinkami).
@@ -418,6 +441,12 @@ struct Config {
         // (pauza) → demote zawsze. 0 = wyłączony. Konfigurowalne w [switch]
         // (cpu-temp-gate), reload przez SIGHUP.
         int  cpu_temp_gate = 70;
+        // v5.9: próg temp CPU (°C) dla termicznego odciążania kart tytułowych
+        // (YT/Discord). CPU ≥ próg → re-promocja do dGPU nawet bez zmiany
+        // tytułu/focusu + demote zablokowany (dGPU < temp-gate, busy ≥ 5%) —
+        // dGPU przejmuje render, CPU się chłodzi. 0 = wyłączony. Konfiguro-
+        // walne w [switch] (cpu-temp-promote), reload przez SIGHUP.
+        int  cpu_temp_promote = 80;
         // v5.6: tytuły Discord/YouTube (kopiowane z [preferred-titles] w parserze)
         // — promocja tytułowa karty w przeglądarce, NIE zapinka (idle-release).
         std::set<std::string> preferred_titles;
@@ -484,6 +513,8 @@ static const char* dgpu_state_name(int idx, const Config::DgpuActiveCfg& d)
 // pasek Omarchy). off|override|compiler|igd|dga; tmin/tmax = aktywny zakres.
 static std::string g_fan_curve = "off";
 static int  g_fan_tmin = 51, g_fan_tmax = 91;
+// v5.9: punkt przegięcia krzywy 3-punktowej (0 = legacy liniowa) — status.
+static int  g_fan_tmid = 0, g_fan_pmid = 0;
 static int  g_fan_rpm1 = 0, g_fan_rpm2 = 0;
 
 // ------------------------------------------------------------------ pomocnicze
@@ -665,6 +696,12 @@ static bool load_config(const std::string& path, Config& cfg)
             else if (keyf == "temp-max")    cfg.fan_temp_max   = parse_int(valf);
             else if (keyf == "temp-min-igd") cfg.fan_temp_min_igd = parse_int(valf);
             else if (keyf == "temp-max-igd") cfg.fan_temp_max_igd = parse_int(valf);
+            // v5.9: 3-punktowa krzywa — temp-mid (°C przegięcia) + fan-mid
+            // (% zakresu RPM przy temp-mid); osobne pary dla igd.
+            else if (keyf == "temp-mid")    cfg.fan_temp_mid     = parse_int(valf);
+            else if (keyf == "fan-mid")     cfg.fan_mid          = parse_int(valf);
+            else if (keyf == "temp-mid-igd") cfg.fan_temp_mid_igd = parse_int(valf);
+            else if (keyf == "fan-mid-igd") cfg.fan_mid_igd      = parse_int(valf);
             continue;
         }
         // v4.6: sekcja [compiler] — boost wentylatorów gdy wykryty kompilator.
@@ -715,6 +752,9 @@ static bool load_config(const std::string& path, Config& cfg)
             else if (keys == "class-idle-busy")  cfg.sw.class_idle_busy   = parse_int(vals);
             // v5.7: cpu-temp-gate — próg temp CPU (°C) dla demote [dgpu-idle].
             else if (keys == "cpu-temp-gate")    cfg.sw.cpu_temp_gate     = parse_int(vals);
+            // v5.9: cpu-temp-promote — próg temp CPU (°C) dla kart tytułowych
+            // (YT/Discord): CPU ≥ próg → re-promocja + blokada demote (0 = off).
+            else if (keys == "cpu-temp-promote") cfg.sw.cpu_temp_promote  = parse_int(vals);
             continue;
         }
         // v5.0: sekcja [dpower] — backend power dGPU.
@@ -813,6 +853,18 @@ static bool load_config(const std::string& path, Config& cfg)
              cfg.fan_temp_max_igd, cfg.fan_temp_min_igd);
         cfg.fan_temp_min_igd = 41; cfg.fan_temp_max_igd = 91;
     }
+    // v5.9: sanity 3-punktowa krzywa. fan-mid clamp do [0,100] (100 = pełne
+    // wiatraki od temp-mid). temp-mid: ≤ 0 → wyłączony (0); poza (temp-min,
+    // temp-max) → wyłącz (0) — legacy liniowa (dwuodcinkowa wymaga punktu
+    // przegięcia ściśle wewnątrz zakresu).
+    if (cfg.fan_mid < 0) cfg.fan_mid = 0;
+    if (cfg.fan_mid > 100) cfg.fan_mid = 100;
+    if (cfg.fan_mid_igd < 0) cfg.fan_mid_igd = 0;
+    if (cfg.fan_mid_igd > 100) cfg.fan_mid_igd = 100;
+    if (cfg.fan_temp_mid <= 0 || cfg.fan_temp_mid <= cfg.fan_temp_min ||
+        cfg.fan_temp_mid >= cfg.fan_temp_max) cfg.fan_temp_mid = 0;
+    if (cfg.fan_temp_mid_igd <= 0 || cfg.fan_temp_mid_igd <= cfg.fan_temp_min_igd ||
+        cfg.fan_temp_mid_igd >= cfg.fan_temp_max_igd) cfg.fan_temp_mid_igd = 0;
     // v4.6: sanity compiler — fan-max clamp do [0,100] (100 = pełne wiatraki).
     if (cfg.compiler_fan_max < 0) cfg.compiler_fan_max = 0;
     if (cfg.compiler_fan_max > 100) cfg.compiler_fan_max = 100;
@@ -844,6 +896,8 @@ static bool load_config(const std::string& path, Config& cfg)
     if (cfg.sw.class_idle_busy < 0 || cfg.sw.class_idle_busy > 100) cfg.sw.class_idle_busy = 33;
     // v5.7: sanity cpu-temp-gate — °C clamp [0,100]; 0 = wyłączony; błędna → 70.
     if (cfg.sw.cpu_temp_gate < 0 || cfg.sw.cpu_temp_gate > 100) cfg.sw.cpu_temp_gate = 70;
+    // v5.9: sanity cpu-temp-promote — °C clamp [0,100]; 0 = wyłączony; błędna → 80.
+    if (cfg.sw.cpu_temp_promote < 0 || cfg.sw.cpu_temp_promote > 100) cfg.sw.cpu_temp_promote = 80;
     // v5.4: sanity [dgpu-active]. Stany muszą być znane (07/0a/0e/0f) i
     // baseline <= max. Progi busy clamp do [0,100]. activity-source: tylko
     // "evdev" daje sygnał inputu; "none"/"cursorpos" → brak (idle po dwell).
@@ -1095,26 +1149,37 @@ public:
 
     // Ustaw wentylatory wg temp. temp<0 (brak hwmon) → pomiń (zostaw poprzedni stan).
     // tmin>=tmax (zły config) → clamp do max RPM (bezpieczniej chłodzić).
-    void set(int temp, int tmin, int tmax)
+    // v5.9: krzywa dwuodcinkowa: temp-min → temp-mid (fan-mid% zakresu) → temp-max.
+    // temp-mid ≤ 0 lub poza (temp-min, temp-max) → legacy liniowa.
+    void set(int ft, int tmin, int tmid, int tmax, int pmid)
     {
         if (!ok_) return;
         // v5.0: temp<0 (hwmon nouveau zniknął — dGPU OFF) → krzywa min (x=0).
         // Wcześniej fail-safe "nie ruszaj" zostawiał wentylatory na ostatniej
         // wartości; po power-off dGPU temp jest stale -1, więc krzywa musi zejść
         // do min (SMC ma ochronę termiczną nadrzędną nad manual).
-        if (temp < 0) temp = tmin;
-        double x;
-        if (tmax <= tmin) x = 1.0;               // zły zakres → max (chłodź)
-        else if (temp <= tmin) x = 0.0;
-        else if (temp >= tmax) x = 1.0;
-        else x = (double)(temp - tmin) / (double)(tmax - tmin);
-        int rpm1 = fan1_min_ + (int)(x * (fan1_max_ - fan1_min_) + 0.5);
-        int rpm2 = fan2_min_ + (int)(x * (fan2_max_ - fan2_min_) + 0.5);
+        if (ft < 0) ft = tmin;
+        double pct;
+        if (tmid > tmin && tmid < tmax && pmid > 0) {
+            if (ft <= tmid)
+                pct = (double)(ft - tmin) / (tmid - tmin) * (pmid / 100.0);
+            else
+                pct = (pmid / 100.0) + (double)(ft - tmid) / (tmax - tmid) * ((100 - pmid) / 100.0);
+        } else {
+            if (tmax <= tmin) pct = 1.0;         // zły zakres → max (chłodź)
+            else if (ft <= tmin) pct = 0.0;
+            else if (ft >= tmax) pct = 1.0;
+            else pct = (double)(ft - tmin) / (tmax - tmin);
+        }
+        if (pct < 0.0) pct = 0.0;
+        if (pct > 1.0) pct = 1.0;
+        int rpm1 = fan1_min_ + (int)(pct * (fan1_max_ - fan1_min_) + 0.5);
+        int rpm2 = fan2_min_ + (int)(pct * (fan2_max_ - fan2_min_) + 0.5);
         write_file((std::string(FAN_BASE) + "/fan1_manual").c_str(), "1");
         write_file((std::string(FAN_BASE) + "/fan2_manual").c_str(), "1");
         write_file((std::string(FAN_BASE) + "/fan1_output").c_str(), std::to_string(rpm1));
         write_file((std::string(FAN_BASE) + "/fan2_output").c_str(), std::to_string(rpm2));
-        last_temp_ = temp; last_rpm1_ = rpm1; last_rpm2_ = rpm2;
+        last_temp_ = ft; last_rpm1_ = rpm1; last_rpm2_ = rpm2;
     }
 
     // v4.6: BOOST — wymuś pct% maksymalnych RPM (100 = pełne wiatraki). Zamiast
@@ -1198,6 +1263,30 @@ static std::string compiler_match(const std::string& name)
     return "";
 }
 
+// v5.8: czy cmdline procesu wskazuje na uruchamianie testów (a nie kompilację)?
+// cmdline to surowe argv oddzielone '\0' (read_file bez transformacji).
+static bool is_test_runner(const std::string& cmdline)
+{
+    if (cmdline.empty()) return false;
+    // cmake -P .../GoogleTest/LaunchTest.cmake — CTest uruchamia testy przez cmake
+    if (cmdline.find("LaunchTest.cmake") != std::string::npos) return true;
+    if (cmdline.find("GoogleTest") != std::string::npos) return true;
+    // ctest — driver testów CTest
+    if (cmdline.find("ctest") != std::string::npos) return true;
+    // "make test" / "make check" — cele testowe Makefile (argv[1]), nie kompilacja
+    std::string a0 = cmdline.substr(0, cmdline.find('\0'));
+    size_t slash = a0.rfind('/');
+    std::string base = slash == std::string::npos ? a0 : a0.substr(slash + 1);
+    if (base == "make") {
+        size_t p1 = cmdline.find('\0');
+        if (p1 != std::string::npos) {
+            std::string a1 = cmdline.substr(p1 + 1, cmdline.find('\0', p1 + 1) - (p1 + 1));
+            if (a1 == "test" || a1 == "check") return true;
+        }
+    }
+    return false;
+}
+
 // Skanuje /proc i zwraca nazwę wykrytego kompilatora lub "" gdy brak.
 // Wywoływana tylko w bloku wentylatorów (co poll_cycles = 1 s).
 static std::string compiler_running()
@@ -1213,7 +1302,16 @@ static std::string compiler_running()
         if (read_file((bp + "/comm").c_str(), comm) == 0) {
             comm = trim(comm);
             found = compiler_match(comm);
-            if (!found.empty()) break;
+            if (!found.empty()) {
+                // v5.8: pełny cmdline rozstrzyga — procesy testowe (cmake -P
+                // LaunchTest.cmake / ctest / "make test"/"make check") nie są
+                // kompilatorem; pomiń i skanuj dalej. Gdy cmdline nieczytelny →
+                // traktuj jak kompilator (bezpiecznie dla boostu).
+                std::string cmdline;
+                if (read_file((bp + "/cmdline").c_str(), cmdline) == 0 && is_test_runner(cmdline))
+                    continue;
+                break;
+            }
         }
         // Fallback: cmdline (argv[0] basename). Pomiń wątki jądra (comm "[...]" —
         // cmdline i tak puste), oszczędza otwieranie plików dla ~100 wątków.
@@ -1226,7 +1324,12 @@ static std::string compiler_running()
                 size_t slash = a0.rfind('/');
                 std::string base = slash == std::string::npos ? a0 : a0.substr(slash + 1);
                 found = compiler_match(base);
-                if (!found.empty()) break;
+                if (!found.empty()) {
+                    // v5.8: jak wyżej — test runner (cmake -P LaunchTest.cmake,
+                    // ctest, "make test"/"make check") odpada od boostu.
+                    if (is_test_runner(cmdline)) continue;
+                    break;
+                }
             }
         }
     }
@@ -2000,7 +2103,19 @@ public:
         // karty) — to NIE sygnał idle, tylko brak pomiaru. Bez tego zabezpieczenia
         // promocja tytułowa nigdy by nie wystartowała z OFF (idle_title=zawsze).
         const bool busy_known = (target_ == DGPU);
-        const bool idle_title = busy_known && (int)in.busy < cfg.title_idle_busy * 10;  // ‰
+        bool idle_title = busy_known && (int)in.busy < cfg.title_idle_busy * 10;  // ‰
+        // v5.9: CPU ≥ cpu-temp-promote + dGPU ma zapas termalny → trzymaj dGPU
+        // (karta renderuje — offload CPU). busy < 5% (pauza) → demote zawsze.
+        if (idle_title) {
+            bool cpu_offload = cfg.cpu_temp_promote > 0 && in.cpu_temp >= 0 &&
+                               in.cpu_temp >= cfg.cpu_temp_promote;
+            bool dgpu_hot = in.temp >= 0 && in.temp >= cfg.temp_gate;
+            // v5.9 guard: po power-on busy ≈ 0% (liczniki świeże) — przed
+            // pstate-settle-ms od promocji trzymaj dGPU (escape busy<5% później).
+            bool fresh_on = since(last_promote_) < cfg.pstate_settle_ms;
+            if (cpu_offload && !dgpu_hot && ((int)in.busy >= 50 || fresh_on))
+                idle_title = false;
+        }
 
         // Miękka promocja: focused class ∈ dgpu_soft AND busy > busy_enter.
         bool soft = !in.focused_class.empty() && cfg.dgpu_soft.count(in.focused_class) &&
@@ -2033,7 +2148,11 @@ public:
                 // busy < 5% (pauza) → demote zawsze.
                 bool cpu_hot  = in.cpu_temp >= 0 && in.cpu_temp >= cfg.cpu_temp_gate;
                 bool dgpu_hot = in.temp >= 0 && in.temp >= cfg.temp_gate;
-                bool truly_idle = (int)in.busy < 50;
+                // v5.9: po power-on busy jest niewiarygodny (~0%, liczniki świeże) —
+                // escape busy<5% dopiero po pstate-settle-ms od promocji, inaczej
+                // termiczna promocja demotuje po ~1 s i churnuje co hold.
+                bool fresh_on = since(last_promote_) < cfg.pstate_settle_ms;
+                bool truly_idle = (int)in.busy < 50 && !fresh_on;
                 if (cpu_hot && !dgpu_hot && !truly_idle) {
                     idle_now = false;
                     if (!gate_logged_) {
@@ -2084,9 +2203,13 @@ public:
             // Discord z busy poniżej progu zostaje na iGPU na cały okres tego
             // samego tytułu (zero churnu); nowe wideo/kanał (tytuł się zmienia)
             // → re-promocja, hold nadal rate-limit'uje.
+            // v5.9: termiczne odciążanie CPU — CPU ≥ cpu-temp-promote → re-promocja
+            // nawet bez zmiany tytułu/focusu (dGPU przejmuje render, CPU się chłodzi).
+            bool cpu_offload = cfg.cpu_temp_promote > 0 && in.cpu_temp >= 0 &&
+                               in.cpu_temp >= cfg.cpu_temp_promote;
             bool changed = in.focused_title != last_demote_title_ ||
                            in.focused_class != last_demote_class_;
-            if (target_ != DGPU && thermal_ok && changed &&
+            if (target_ != DGPU && thermal_ok && (changed || cpu_offload) &&
                 since(last_demote_) >= cfg.title_idle_hold_ms) {
                 last_promote_ = now;
                 target_ = DGPU;
@@ -2562,13 +2685,15 @@ private:
             "\"target\": \"%s\", \"override\": \"%s\", \"last_action\": \"%s\", "
             "\"last_error\": \"%s\", \"nvram_prefs\": \"%s\", \"igpu_freq_mhz\": %d, "
             "\"fan_curve\": \"%s\", \"fan_tmin\": %d, \"fan_tmax\": %d, "
+            "\"fan_tmid\": %d, \"fan_pmid\": %d, "
             "\"fan_rpm1\": %d, \"fan_rpm2\": %d, \"ts\": %lld }\n",
             topo_.name(), st.on() ? "on" : "off", dgpu_state_val,
             dgpu_input_active_, dgpu_video_,
             target_name(), json_escape(override_).c_str(),
             json_escape(last_action_).c_str(),
             json_escape(last_error_).c_str(), nvram_prefs_.c_str(), igpu_freq,
-            g_fan_curve.c_str(), g_fan_tmin, g_fan_tmax, g_fan_rpm1, g_fan_rpm2,
+            g_fan_curve.c_str(), g_fan_tmin, g_fan_tmax, g_fan_tmid, g_fan_pmid,
+            g_fan_rpm1, g_fan_rpm2,
             (long long)std::time(nullptr));
         write_file(SWITCH_STATUS_FILE, buf);
         write_file(SWITCH_DGPU_FILE, st.on() ? "on" : "off");
@@ -2723,7 +2848,7 @@ private:
 static void usage(const char* argv0)
 {
     std::printf(
-        "reclockd v5.7 — polityka profilowa (app-aware) + wentylatory + switchd + [dgpu-active] + switchd tune + override + reload + nvram cache\n"
+        "reclockd v5.9 — polityka profilowa (app-aware) + wentylatory + switchd + [dgpu-active] + switchd tune + override + reload + nvram cache\n"
         "Użycie: %s [opcje]\n"
         "  switchd (v5.0): dGPU power-state + render routing. W DIS = monitor\n"
         "    (zero zmian power). Sekcje [switch]/[dpower]/[dgpu-hard]/[dgpu-soft]\n"
@@ -3048,7 +3173,7 @@ int main(int argc, char** argv)
                           " evdev=" + std::to_string(input.device_count()) + " urz.";
     }
 
-    logf(1, "start v5.7: interval=%dms poll=%dms, "
+    logf(1, "start v5.9: interval=%dms poll=%dms, "
             "default[cap=%s temp-up=%d temp-down=%d], "
             "preferred[cap=%s boost=%s busy-boost=%d%% boost-dwell=%dms "
             "temp-up=%d temp-down=%d], "
@@ -3155,18 +3280,25 @@ int main(int argc, char** argv)
                 if (ctemp > ft) ft = ctemp;
                 // v5.1: aktywna krzywa — standardowa (dGPU ON) albo igd (tylko-iGPU,
                 // dGPU OFF → temp=CPU). Wybór wg stanu power dGPU (nie topologii).
+                // v5.9: + punkt przegięcia 3-punktowej krzywej wg aktywnej krzywej.
                 int tmin = g_cfg.fan_temp_min;
                 int tmax = g_cfg.fan_temp_max;
+                int tmid = g_cfg.fan_temp_mid;
+                int pmid = g_cfg.fan_mid;
                 bool igd_curve = sw.enabled() && sw.dgpu_off();
-                if (igd_curve) { tmin = g_cfg.fan_temp_min_igd; tmax = g_cfg.fan_temp_max_igd; }
+                if (igd_curve) {
+                    tmin = g_cfg.fan_temp_min_igd; tmax = g_cfg.fan_temp_max_igd;
+                    tmid = g_cfg.fan_temp_mid_igd; pmid = g_cfg.fan_mid_igd;
+                }
                 // v5.1: zapamiętaj stan dla statusu (aktualna krzywa + obroty).
                 if (boost_on) {
                     fan.set_boost(g_cfg.compiler_fan_max);
                     g_fan_curve = "compiler";
                 } else {
-                    fan.set(ft, tmin, tmax);
+                    fan.set(ft, tmin, tmid, tmax, pmid);
                     g_fan_curve = igd_curve ? "igd" : "dga";
                     g_fan_tmin = tmin; g_fan_tmax = tmax;
+                    g_fan_tmid = tmid; g_fan_pmid = pmid;
                 }
                 int r1 = fan.last_rpm1(), r2 = fan.last_rpm2();
                 g_fan_rpm1 = r1; g_fan_rpm2 = r2;
@@ -3174,6 +3306,11 @@ int main(int argc, char** argv)
                     if (boost_on)
                         logf(1, "fan: KOMPILATOR wykryty (%s) -> fan1=%d fan2=%d RPM (boost %d%%)",
                              cname.c_str(), r1, r2, g_cfg.compiler_fan_max);
+                    // v5.9: krzywa 3-punktowa — log z punktem przegięcia
+                    // (tmin-tmid-tmax); mid wyłączony → legacy format 2-punktowy.
+                    else if (tmid > tmin && tmid < tmax && pmid > 0)
+                        logf(1, "fan: temp=%d°C -> fan1=%d fan2=%d RPM (krzywa %d-%d-%d°C%s)",
+                             ft, r1, r2, tmin, tmid, tmax, igd_curve ? " igd" : "");
                     else
                         logf(1, "fan: temp=%d°C -> fan1=%d fan2=%d RPM (krzywa %d-%d°C%s)",
                              ft, r1, r2, tmin, tmax, igd_curve ? " igd" : "");

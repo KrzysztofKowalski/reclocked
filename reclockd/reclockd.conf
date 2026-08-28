@@ -137,7 +137,8 @@ temp-per-profile = true
 # temp-up = 65
 
 # v4.2: sterowanie wentylatorami applesmc (SMC MacBooka). Krzywa temp→RPM:
-# liniowa interpolacja między fanN_min (przy temp-min) a fanN_max (przy temp-max).
+# v5.9: dwuodcinkowa interpolacja: temp-min → temp-mid (fan-mid% zakresu RPM)
+# → temp-max (stromo do 100%). temp-mid=0 → legacy liniowa (1:1) jak dotychczas.
 # Zakresy RPM (fanN_min/max) czytane dynamicznie z sysfs przy starcie — NIE
 # hardkodowane (fan1≈2160-6156, fan2≈2000-5700 RPM na GT 750M). Aktualizacja
 # co poll-ms (1 s). temp ≤ temp-min → min RPM (cicho), temp ≥ temp-max → max RPM.
@@ -145,14 +146,22 @@ temp-per-profile = true
 # restore_auto przy wyjściu → fanN_manual=0 (SMC przejmuje, fail-safe).
 # v5.1: temp-min-igd/temp-max-igd — osobna krzywa gdy włączone TYLKO iGPU
 # (dGPU OFF; temp = CPU/coretemp, bo hwmon nouveau znika). Gdy dGPU ON →
-# krzywa temp-min/temp-max (55/99); obie krzywe wchodzą na max przy 99°C.
-# Cichsze: start wiatraków przy 55°C (dga) / 33°C (igd). Wybór wg sw.dgpu_off().
+# krzywa temp-min/temp-mid/temp-max (55-80-90, 3-punktowa); obie krzywe wchodzą
+# na max przy 90°C. Cichsze: start wiatraków przy 55°C (dga) / 33°C (igd).
+# Wybór wg sw.dgpu_off().
 [fan]
 enable = true
 temp-min = 55
-temp-max = 99
+# v5.9: punkt przegięcia 80°C przy 60% zakresu RPM (dga); powyżej → stromo do
+# pełnych obrotów przy 90°C. temp-mid=0 → legacy liniowa.
+temp-mid = 80
+fan-mid = 60
+temp-max = 90
 temp-min-igd = 33
-temp-max-igd = 99
+# v5.9: krzywa igd — przegięcie 80°C przy 70% zakresu RPM.
+temp-mid-igd = 80
+fan-mid-igd = 70
+temp-max-igd = 90
 
 # v4.6: boost wentylatorów gdy wykryty uruchomiony kompilator. Skan /proc/*/comm
 # (fallback cmdline) co poll-ms (1 s) za: clang, clang++, gcc, g++, cc, c++,
@@ -164,6 +173,7 @@ temp-max-igd = 99
 # Boost działa TYLKO w auto-mode — fan-override (/run/reclockd/fan-override,
 # reclockctl fan-off) ma priorytet (ręczne sterowanie nie jest nadpisywane).
 # Gdy kompilator zniknie → powrót do krzywej temp (normalna ścieżka).
+# v5.8: procesy testowe (cmake -P LaunchTest.cmake/CTest, ctest, make test) NIE liczą się jako kompilator — boost tylko przy faktycznej kompilacji.
 [compiler]
 enable = true
 fan-max = 100
@@ -222,6 +232,12 @@ class-idle-busy = 33
 # próg (robi coś innego) + dGPU poniżej temp-gate (ma zapas termalny) → mpv
 # zostaje na dGPU. busy < 5% (pauza) → demote zawsze. 0 = wyłączony.
 cpu-temp-gate = 70
+# v5.9: termiczne odciążanie CPU — karta tytułowa (YT/Discord): CPU ≥ próg →
+# re-promocja do dGPU bez zmiany tytułu/focusu + demote zablokowany (dGPU <
+# temp-gate, busy ≥ 5%) — dGPU przejmuje render, CPU się chłodzi. 0 = wyłączony.
+# Guard: busy po power-onie jest niewiarygodny przez pstate-settle-ms — escape
+# busy<5% dopiero po tym czasie (bez churnu przy CPU ≥ próg).
+cpu-temp-promote = 80
 pstate-settle-ms = 10000
 pstate-write-timeout-ms = 2000
 
