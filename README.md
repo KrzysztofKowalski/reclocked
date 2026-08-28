@@ -189,7 +189,8 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   focus promotes the dGPU (power-on) with the `[preferred]` profile (pstate
   `0a/0e`); focus moving to a terminal demotes back (`[igpu]`/`[low-power]`).
   Config-only — the daemon picks it up live via `reclockctl reload` (SIGHUP),
-  no rebuild.
+  no rebuild. **(v5.6 superseded this — browsers were removed from
+  `[dgpu-hard]`; Discord/YouTube tabs now promote by window title, see below.)**
 - 🎛 **`[dgpu-active]` — 3-step pstate policy for the whole dGPU (v5.4)**: when
   enabled, the profile ladder is replaced by a unified state machine that
   applies to **every** app running on the dGPU: `0a` baseline ("efficient power
@@ -202,6 +203,16 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   `[low-power]` focus clamps the ceiling to `low-power-ceiling`, thermals stay
   per-profile. Status gains `dgpu_state` / `input_active` / `video`. Disable
   with `enable = false` (old profile/ladder logic returns).
+- 🎛 **switchd tune — browsers out of `[dgpu-hard]`, title-driven promotion (v5.6)**:
+  browser classes were **removed** from `[dgpu-hard]` — a focused browser tab no
+  longer forces the dGPU by class. Instead, Discord/YouTube tabs promote by window
+  **title** (`[preferred-titles]`, case-insensitive); every other tab is neutral
+  (iGPU). Title promotion is **not a latch**: a promoted card whose busy drops
+  below `title-idle-busy` (default 33 %, `[switch]`, SIGHUP-reloadable) is
+  demoted to the iGPU (power-off) after `dwell-out-ms`. Focusing anything that is
+  not Discord/YouTube demotes after 1 s regardless of busy (the downclock to `07`
+  is done by `[dgpu-active]`). Switch timers shortened: `dwell-out-ms` /
+  `min-residence-ms` / `cooldown-ms` / `min-switch-gap-ms` = 1000 ms.
 - 🌡 **Per-profile thermal guard**: thermal downclock is **per-profile**, not
   global. `default` throttles at 65°C / recovers below 58°C; `preferred`
   throttles at 82°C / recovers below 75°C. Thermal down is prioritized over
@@ -495,14 +506,15 @@ is out of scope for the gmux.
 | `enable` | `true` | 1/0 — module on/off |
 | `tick-ms` | `1000` | decision tick (== `poll-ms`) |
 | `dwell-in-ms` | `3000` | entry dwell for soft promotion (busy-gated) |
-| `dwell-out-ms` | `5000` | exit dwell for demote |
-| `min-residence-ms` | `20000` | minimum time on the dGPU after promotion (anti-flapping) |
-| `cooldown-ms` | `45000` | cooldown after demote before a new promotion |
+| `dwell-out-ms` | `1000` | exit dwell for demote (v5.6: shortened to 1 s) |
+| `min-residence-ms` | `1000` | minimum time on the dGPU after promotion (anti-flapping) (v5.6: shortened to 1 s) |
+| `cooldown-ms` | `1000` | cooldown after demote before a new promotion (v5.6: shortened to 1 s) |
 | `wait-ready-ms` | `2000` | timeout for the wait after power-off |
-| `min-switch-gap-ms` | `10000` | minimum gap between power toggles |
+| `min-switch-gap-ms` | `1000` | minimum gap between power toggles (v5.6: shortened to 1 s) |
 | `temp-gate` | `82` | °C — don't promote when the dGPU is hotter |
 | `busy-enter` | `80` | busy% for soft promotion |
 | `busy-exit` | `40` | busy% for demote |
+| `title-idle-busy` | `33` | v5.6: busy% below which a title-promoted Discord/YouTube card is 'idle' → demote to iGPU (power-off) after `dwell-out-ms`; SIGHUP-reloadable |
 | `pstate-settle-ms` | `10000` | don't write pstate after power-on — GPU clock settle after D3hot→D0 (the first clock change can hang the nouveau workqueue) |
 | `pstate-write-timeout-ms` | `2000` | pstate write runs in a separate thread; on timeout the daemon stays alive and pauses pstate writes |
 
@@ -518,9 +530,9 @@ is out of scope for the gmux.
 What promotes / demotes:
 
 - `[dgpu-hard]` — window classes that force the dGPU on (hard promotion, no
-  busy gate): `game`, `blender`, `steam`, `chromium`, `firefox`,
-  `google-chrome`, `brave` (v5.2: browsers — focus → dGPU ON + pstate `0a/0e`
-  from `[preferred]`; demote when focus moves to a terminal).
+  busy gate): `game`, `blender`, `steam` (v5.6: browsers **removed** — a
+  focused browser tab no longer forces the dGPU by class; Discord/YouTube tabs
+  promote by window title via `[preferred-titles]`, other tabs are neutral).
 - `[dgpu-soft]` — classes with busy-gated soft promotion (empty by default).
 - `[igpu]` — classes always kept on the iGPU (demotion): `foot`, `kitty`,
   `alacritty`.

@@ -1,4 +1,4 @@
-# /etc/reclockd.conf — reclockd daemon configuration v5.4 ([dgpu-active] policy + fan + switchd)
+# /etc/reclockd.conf — reclockd daemon configuration v5.6 ([dgpu-active] policy + fan + switchd)
 # Copy: sudo cp reclockd.conf /etc/reclockd.conf
 #
 # List of "preferred" application classes (hyprctl activewindow/clients .class).
@@ -21,14 +21,14 @@ brave
 # Discord web: title contains "Discord". YouTube: "YouTube" / " - YouTube".
 # v4.4: applies ONLY to browser tabs (class chromium/firefox etc.) —
 # desktop Discord (Electron or Chrome PWA) is handled by [caps].
-# v5.4: with [dgpu-active] the title is INFORMATIONAL (status/log "video: ...") —
+# v5.6: with [dgpu-active] the title is INFORMATIONAL (status/log "video: ...") —
 # it does NOT force 0e. 0e is entered solely via busy > busy-enter (80%) + temp.
 [preferred-titles]
 Discord
 YouTube
  - YouTube
 
-# v5.4: player classes that qualify as "video" INFORMATIONALLY (status/log) when the
+# v5.6: player classes that qualify as "video" INFORMATIONALLY (status/log) when the
 # title does not contain a known service (mpv/vlc put a file path in the title).
 # Title/class video does NOT decide the pstate (0e = exclusively busy-driven).
 [video-classes]
@@ -40,7 +40,7 @@ YouTube
 #   max      — ceiling (never higher than this), hex pstate (e.g. 0e)
 #   busy-up  — custom UP-LOAD threshold (%), instead of the global busy-up (80)
 # A class with an entry = preferred (when focused) and does NOT catch title-priority.
-# v5.4: desktop Discord was REMOVED (user decision 2026-08-28) — Discord is now
+# v5.6: desktop Discord was REMOVED (user decision 2026-08-28) — Discord is now
 # treated like any other class on the dGPU: it gets the full [dgpu-active] eco
 # (0a baseline / 07 deep idle / 0e only at real busy > 80%).
 # The section stays for classes that want a HARD floor (e.g. floor=0a = never 07).
@@ -100,7 +100,7 @@ exit-state = 0a
 # the engine — the gate defers DOWN until busy hits a valley. UP-LOAD/BOOST-UP not gated.
 gr-idle-promille = 300
 
-# v5.4: [dgpu-active] — THREE-STEP pstate policy for the WHOLE dGPU when ON.
+# v5.6: [dgpu-active] — THREE-STEP pstate policy for the WHOLE dGPU when ON.
 # (report 79 + user decisions 2026-08-28). Replaces profile-based state selection:
 #   0a (baseline) — "efficient power save" — default state of a working dGPU
 #   07 (deep idle) — dGPU ON, nothing rendering, no input for the dwell
@@ -185,18 +185,27 @@ fan-max = 100
 #                       the first clock change may wedge the nouveau workqueue)
 #   pstate-write-timeout-ms — pstate write timeout (kernel hang safety: the write runs in
 #                       a separate thread; after timeout the daemon stays alive and suspends pstate)
+#   title-idle-busy   — % busy: a Discord/YT card (title promotion) below this busy% is
+#                       'idle' → demote to iGPU (power-off) after dwell-out
+# v5.6: browsers are NO LONGER in [dgpu-hard] — Discord/YouTube tabs promote by
+# title ([preferred-titles]); other tabs are neutral (iGPU). Title promotion is
+# not a latch (busy < title-idle-busy → demote). Timers shortened to 1 s.
 [switch]
 enable = true
 tick-ms = 1000
 dwell-in-ms = 3000
-dwell-out-ms = 5000
-min-residence-ms = 20000
-cooldown-ms = 45000
+dwell-out-ms = 1000
+min-residence-ms = 1000
+cooldown-ms = 1000
 wait-ready-ms = 2000
-min-switch-gap-ms = 10000
+min-switch-gap-ms = 1000
 temp-gate = 82
 busy-enter = 80
 busy-exit = 40
+# v5.6: busy% below which a Discord/YouTube card (title promotion) is 'idle'
+# → demote to iGPU (power-off) after dwell-out. Easy to change + reload (SIGHUP).
+# Playing YT ~25-36% busy stays on the dGPU; real idle drops the dGPU.
+title-idle-busy = 33
 pstate-settle-ms = 10000
 pstate-write-timeout-ms = 2000
 
@@ -212,16 +221,13 @@ wait-idle-timeout-ms = 5000
 wait-ready-timeout-ms = 10000
 
 # Window classes that require the dGPU (hard promotion, no busy-gate)
-# v5.2: browsers — browser focus → dGPU ON (power + pstate 0a/0e
-# from the [preferred] profile). Demote when focus moves to [low-power]/[igpu].
+# v5.6: browsers REMOVED — Discord/YouTube tabs promote by title
+# ([preferred-titles]); other tabs are neutral (iGPU). Hard promotion only for
+# heavy apps. Title promotion is not a latch: busy < title-idle-busy → demote.
 [dgpu-hard]
 game
 blender
 steam
-chromium
-firefox
-google-chrome
-brave
 
 # Window classes with soft promotion (busy-gated) — empty by default
 [dgpu-soft]

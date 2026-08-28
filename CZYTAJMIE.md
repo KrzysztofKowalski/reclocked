@@ -198,7 +198,9 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
   przeglądarki promuje dGPU (power-on) z profilem `[preferred]` (pstate
   `0a/0e`); przejście focusu na terminal demote'uje z powrotem
   (`[igpu]`/`[low-power]`). Tylko konfiguracja — daemon widzi zmianę na żywo
-  przez `reclockctl reload` (SIGHUP), bez rebuildu.
+  przez `reclockctl reload` (SIGHUP), bez rebuildu. **(v5.6 zastępuje ten
+  mechanizm — przeglądarki usunięte z `[dgpu-hard]`; karty Discord/YouTube
+  promują po tytule okna, patrz niżej.)**
 - 🎛 **`[dgpu-active]` — trójstopniowa polityka pstate dla CAŁEGO dGPU (v5.4)**:
   po włączeniu drabinka profilowa zostaje zastąpiona zunifikowaną maszyną
   stanów działającą dla **każdej** aplikacji na dGPU: `0a` baseline („efficient
@@ -211,6 +213,17 @@ komfortowo z uruchamianiem demona root, który przepisuje taktowania GPU co
   `[low-power]` obcina ceiling do `low-power-ceiling`, termalne per-profil.
   Status zyskuje `dgpu_state` / `input_active` / `video`. Wyłącz przez
   `enable = false` (stara logika profil/drabinka wraca).
+- 🎛 **switchd tune — przeglądarki usunięte z `[dgpu-hard]`, promocja tytułowa (v5.6)**:
+  klasy przeglądarek zostały **usunięte** z `[dgpu-hard]` — focus karty w
+  przeglądarce nie wymusza już dGPU po klasie. Zamiast tego karty
+  Discord/YouTube promują po **tytule** okna (`[preferred-titles]`,
+  case-insensitive); każda inna karta jest neutralna (iGPU). Promocja tytułowa
+  **nie jest zapinką**: karta, której busy spadnie poniżej `title-idle-busy`
+  (default 33 %, `[switch]`, reload przez SIGHUP), jest demote'owana do iGPU
+  (power-off) po `dwell-out-ms`. Focus na cokolwiek nie-Discord/YT → demote po
+  1 s niezależnie od busy (downclock do `07` robi `[dgpu-active]`). Timery
+  switch skrócone: `dwell-out-ms` / `min-residence-ms` / `cooldown-ms` /
+  `min-switch-gap-ms` = 1000 ms.
 - 🌡 **Per-profil zabezpieczenie termiczne**: downclock termiczny jest
   **per-profil**, a nie globalny. `default` obniża taktowanie przy 65°C /
   odzyskuje poniżej 58°C; `preferred` obniża przy 82°C / odzyskuje poniżej
@@ -512,14 +525,15 @@ Sekcja `[switch]`:
 | `enable` | `true` | 1/0 — moduł włączony/wyłączony |
 | `tick-ms` | `1000` | tick decyzyjny (== `poll-ms`) |
 | `dwell-in-ms` | `3000` | dwell wejścia dla miękkiej promocji (busy-gated) |
-| `dwell-out-ms` | `5000` | dwell wyjścia dla demote |
-| `min-residence-ms` | `20000` | minimalny czas na dGPU po promocji (anti-flapping) |
-| `cooldown-ms` | `45000` | cooldown po demote przed kolejną promocją |
+| `dwell-out-ms` | `1000` | dwell wyjścia dla demote (v5.6: skrócony do 1 s) |
+| `min-residence-ms` | `1000` | minimalny czas na dGPU po promocji (anti-flapping) (v5.6: skrócony do 1 s) |
+| `cooldown-ms` | `1000` | cooldown po demote przed kolejną promocją (v5.6: skrócony do 1 s) |
 | `wait-ready-ms` | `2000` | timeout czekania po power-off |
-| `min-switch-gap-ms` | `10000` | minimalny odstęp między power-toggle |
+| `min-switch-gap-ms` | `1000` | minimalny odstęp między power-toggle (v5.6: skrócony do 1 s) |
 | `temp-gate` | `82` | °C — nie promuj, gdy dGPU gorętszy |
 | `busy-enter` | `80` | busy% dla miękkiej promocji |
 | `busy-exit` | `40` | busy% dla demote |
+| `title-idle-busy` | `33` | v5.6: busy% poniżej którego karta Discord/YT (promocja tytułowa) jest 'idle' → demote do iGPU (power-off) po `dwell-out-ms`; reload przez SIGHUP |
 | `pstate-settle-ms` | `10000` | nie pisz pstate po power-on — settle zegara GPU po D3hot→D0 (pierwsza zmiana clocka potrafi zawiesić workqueue nouveau) |
 | `pstate-write-timeout-ms` | `2000` | zapis pstate w osobnym wątku; po timeoutcie daemon żyje dalej i wstrzymuje zapisy pstate |
 
@@ -535,9 +549,10 @@ Sekcja `[switch]`:
 Co promuje / demote'uje:
 
 - `[dgpu-hard]` — klasy okien wymuszające dGPU (twarda promocja, bez busy
-  gate): `game`, `blender`, `steam`, `chromium`, `firefox`,
-  `google-chrome`, `brave` (v5.2: przeglądarki — focus → dGPU ON + pstate
-  `0a/0e` z profilu `[preferred]`; demote po przejściu focusu na terminal).
+  gate): `game`, `blender`, `steam` (v5.6: przeglądarki **usunięte** — focus
+  karty w przeglądarce nie wymusza już dGPU po klasie; karty Discord/YouTube
+  promują po tytule okna przez `[preferred-titles]`, pozostałe karty są
+  neutralne).
 - `[dgpu-soft]` — klasy z miękką promocją busy-gated (na start puste).
 - `[igpu]` — klasy zawsze na iGPU (democja): `foot`, `kitty`, `alacritty`.
 - `[dgpu-procs]` — nazwy procesów (skan `/proc/*/comm`) wymagające dGPU:

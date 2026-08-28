@@ -1,4 +1,4 @@
-# /etc/reclockd.conf — konfiguracja daemona reclockd v5.4 (polityka [dgpu-active] + fan + switchd)
+# /etc/reclockd.conf — konfiguracja daemona reclockd v5.6 (polityka [dgpu-active] + fan + switchd)
 # Kopiuj: sudo cp reclockd.conf /etc/reclockd.conf
 #
 # Lista class-ów aplikacji "preferred" (hyprctl activewindow/clients .class).
@@ -21,14 +21,14 @@ brave
 # Discord web: tytuł zawiera "Discord". YouTube: "YouTube" / " - YouTube".
 # v4.4: dotyczy TYLKO kart w przeglądarce (klasa chromium/firefox itd.) —
 # desktop Discord (Electron lub PWA Chrome) jest obsługiwany przez [caps].
-# v5.4: przy [dgpu-active] tytuł jest INFORMACYJNY (status/log "video: ...") —
+# v5.6: przy [dgpu-active] tytuł jest INFORMACYJNY (status/log "video: ...") —
 # NIE wymusza 0e. 0e wchodzi wyłącznie przez busy > busy-enter (80%) + temp.
 [preferred-titles]
 Discord
 YouTube
  - YouTube
 
-# v5.4: klasy odtwarzaczy kwalifikujące "video" INFORMACYJNIE (status/log), gdy
+# v5.6: klasy odtwarzaczy kwalifikujące "video" INFORMACYJNIE (status/log), gdy
 # tytuł nie zawiera znanego serwisu (mpv/vlc mają ścieżkę pliku w tytule).
 # Tytuł/klasa video NIE decyduje o stanie pstate (0e = wyłącznie busy-driven).
 [video-classes]
@@ -40,7 +40,7 @@ YouTube
 #   max      — ceiling (nie wyżej niż to), hex pstate (np. 0e)
 #   busy-up  — własny próg UP-LOAD (%), zamiast globalnego busy-up (80)
 # Klasa z wpisem = preferred (gdy focused) i NIE łapie title-priority.
-# v5.4: desktop Discord ZOSTAŁ USUNIĘTY (decyzja usera 2026-08-28) — Discord
+# v5.6: desktop Discord ZOSTAŁ USUNIĘTY (decyzja usera 2026-08-28) — Discord
 # traktowany jak każda inna klasa na dGPU: dostaje pełny eco z [dgpu-active]
 # (0a baseline / 07 deep idle / 0e tylko przy realnym busy > 80%).
 # Sekcja zostaje dla klas, które chcą TWARDE floor (np. floor=0a = nigdy 07).
@@ -100,7 +100,7 @@ exit-state = 0a
 # silnik — gate odracza DOWN aż busy dolinie. UP-LOAD/BOOST-UP nie gate'owane.
 gr-idle-promille = 300
 
-# v5.4: [dgpu-active] — TRÓJSTOPNIOWA polityka pstate dla CAŁEGO dGPU, gdy ON.
+# v5.6: [dgpu-active] — TRÓJSTOPNIOWA polityka pstate dla CAŁEGO dGPU, gdy ON.
 # (raport 79 + decyzje usera 2026-08-28). Zastępuje wybór stanu przez profil:
 #   0a (baseline) — „efficient power save" — domyślny stan dGPU pracującego
 #   07 (deep idle) — dGPU ON, nic się nie renderuje, brak inputu przez dwell
@@ -185,18 +185,27 @@ fan-max = 100
 #                       pierwsza zmiana clocka może zawiesić workqueue nouveau)
 #   pstate-write-timeout-ms — timeout zapisu pstate (kernel hang safety: zapis w
 #                       osobnym wątku, po timeout daemon żyje dalej i wstrzymuje pstate)
+#   title-idle-busy   — % busy: karta Discord/YT (promocja tytułowa) z busy poniżej
+#                       progu jest 'idle' → demote do iGPU (power-off) po dwell-out
+# v5.6: przeglądarki NIE są już w [dgpu-hard] — karty Discord/YouTube promują po
+# tytule ([preferred-titles]); reszta kart neutralna (iGPU). Promocja tytułowa
+# nie jest zapinką (busy < title-idle-busy → demote). Timery skrócone do 1 s.
 [switch]
 enable = true
 tick-ms = 1000
 dwell-in-ms = 3000
-dwell-out-ms = 5000
-min-residence-ms = 20000
-cooldown-ms = 45000
+dwell-out-ms = 1000
+min-residence-ms = 1000
+cooldown-ms = 1000
 wait-ready-ms = 2000
-min-switch-gap-ms = 10000
+min-switch-gap-ms = 1000
 temp-gate = 82
 busy-enter = 80
 busy-exit = 40
+# v5.6: busy % poniżej którego karta Discord/YouTube (promocja tytułowa) jest 'idle'
+# → demote do iGPU (power-off) po dwell-out. Łatwa zmiana + reload (SIGHUP).
+# Grający YT ~25-36% busy zostaje na dGPU; prawdziwy idle zdejmuje dGPU.
+title-idle-busy = 33
 pstate-settle-ms = 10000
 pstate-write-timeout-ms = 2000
 
@@ -212,16 +221,14 @@ wait-idle-timeout-ms = 5000
 wait-ready-timeout-ms = 10000
 
 # Klasy okien wymagające dGPU (twarda promocja, bez busy-gate)
-# v5.2: przeglądarki — focus przeglądarki → dGPU ON (power + pstate 0a/0e
-# z profilu [preferred]). Demote po przejściu focusu na [low-power]/[igpu].
+# v5.6: przeglądarki USUNIĘTE — karty Discord/YouTube promują po tytule
+# ([preferred-titles]), reszta kart jest neutralna (iGPU). Twarda promocja
+# tylko dla ciężkich apki. Tytułowa promocja nie jest zapinką:
+# busy < title-idle-busy → demote do iGPU.
 [dgpu-hard]
 game
 blender
 steam
-chromium
-firefox
-google-chrome
-brave
 
 # Klasy okien z miękką promocją (busy-gated) — na start puste
 [dgpu-soft]

@@ -172,6 +172,16 @@
 //      przez temp-per-profile=false). title_pref (force-0e po tytule) ZNIKA.
 //      Sekcja [dgpu-active]; escape hatch enable=false → stara logika
 //      (profil/ladder) bez zmian. Status: dgpu_state / input_active / video.
+//
+// v5.6 (2026-08-28):
+//   S. SWITCHD TUNE: przeglądarki USUNIĘTE z [dgpu-hard] — karty
+//      Discord/YouTube promują po tytule okna ([preferred-titles], icontains)
+//      zamiast po klasie; reszta kart jest neutralna (iGPU). Promocja tytułowa
+//      NIE jest zapinką: busy < title-idle-busy (default 33%, [switch]) przez
+//      dwell-out → demote do iGPU (power-off). Focus na nie-Discord/YT → demote
+//      po 1 s (niezależnie od busy — downclock do 07 robi [dgpu-active]).
+//      Timery switch skrócone: min-residence/dwell-out/cooldown/min-switch-gap
+//      = 1000 ms. [dgpu-active] bez zmian.
 
 #include <algorithm>
 #include <atomic>
@@ -376,6 +386,13 @@ struct Config {
         int  wait_ready_timeout_ms = 10000; // nouveau reinit po ON
         int  pstate_settle_ms = 10000;   // nie pisz pstate po power-on (clock settle)
         int  pstate_write_timeout_ms = 2000; // timeout zapisu pstate (kernel hang safety)
+        // v5.6: % busy poniżej którego karta Discord/YouTube (promocja tytułowa)
+        // jest "idle" → demote do iGPU (power-off) po dwell-out. Konfigurowalne
+        // w [switch] (title-idle-busy), reload przez SIGHUP.
+        int  title_idle_busy = 33;
+        // v5.6: tytuły Discord/YouTube (kopiowane z [preferred-titles] w parserze)
+        // — promocja tytułowa karty w przeglądarce, NIE zapinka (idle-release).
+        std::set<std::string> preferred_titles;
         std::set<std::string> dgpu_hard;  // [dgpu-hard] klasy — twarda promocja
         std::set<std::string> dgpu_soft;  // [dgpu-soft] klasy — miękka (busy-gated)
         std::set<std::string> igpu;       // [igpu] klasy — zawsze iGPU (democja)
@@ -572,6 +589,8 @@ static bool load_config(const std::string& path, Config& cfg)
         }
         if (section == "preferred-titles") {
             cfg.preferred_titles.insert(t);
+            // v5.6: kopiuj do SwitchCfg — switchd promocja tytułowa Discord/YT.
+            cfg.sw.preferred_titles.insert(t);
             continue;
         }
         if (section == "low-power") {
@@ -662,6 +681,7 @@ static bool load_config(const std::string& path, Config& cfg)
             else if (keys == "busy-exit")         cfg.sw.busy_exit         = parse_int(vals);
             else if (keys == "pstate-settle-ms")  cfg.sw.pstate_settle_ms  = parse_int(vals);
             else if (keys == "pstate-write-timeout-ms") cfg.sw.pstate_write_timeout_ms = parse_int(vals);
+            else if (keys == "title-idle-busy")   cfg.sw.title_idle_busy   = parse_int(vals);
             continue;
         }
         // v5.0: sekcja [dpower] — backend power dGPU.
@@ -781,6 +801,9 @@ static bool load_config(const std::string& path, Config& cfg)
     if (cfg.sw.wait_ready_timeout_ms < 0) cfg.sw.wait_ready_timeout_ms = 0;
     if (cfg.sw.pstate_settle_ms < 0) cfg.sw.pstate_settle_ms = 0;
     if (cfg.sw.pstate_write_timeout_ms < 100) cfg.sw.pstate_write_timeout_ms = 100;
+    // v5.6: sanity title-idle-busy — % busy, clamp [0,100]; błędna wartość
+    // (ujemna/absurdalna) → fallback 33.
+    if (cfg.sw.title_idle_busy < 0 || cfg.sw.title_idle_busy > 100) cfg.sw.title_idle_busy = 33;
     // v5.4: sanity [dgpu-active]. Stany muszą być znane (07/0a/0e/0f) i
     // baseline <= max. Progi busy clamp do [0,100]. activity-source: tylko
     // "evdev" daje sygnał inputu; "none"/"cursorpos" → brak (idle po dwell).
@@ -1878,6 +1901,11 @@ static bool external_display_on_dgpu()
 }
 
 // ----------------------------------------------------------- switchd: polityka
+// v5.6: promocja tytułowa — karta Discord/YouTube w przeglądarce (tytuł okna
+// zawiera wzorzec z [preferred-titles], icontains) → dGPU, ALE NIE zapinka:
+// busy < title-idle-busy ([switch], default 33%) przez dwell-out → demote
+// do iGPU. Focus na nie-Discord/YT → demote po 1 s (niezależnie od busy).
+// Twarda promocja ([dgpu-hard]/external/[dgpu-procs]) = latch.
 
 class SwitchPolicy {
 public:
@@ -1885,6 +1913,8 @@ public:
 
     struct Input {
         std::string focused_class;
+        // v5.6: tytuł okna — promocja tytułowa Discord/YouTube ([preferred-titles]).
+        std::string focused_title;
         std::vector<std::string> consumers;   // dgpu_consumers() — comm nazwy
         uint32_t busy = 0;                    // ‰ (g_last_busy)
         int temp = -1;                        // °C
@@ -1901,7 +1931,8 @@ public:
 
         const bool thermal_ok = (in.temp < 0 || in.temp < cfg.temp_gate);
 
-        // Twarda promocja: focused class ∈ dgpu_hard LUB proc ∈ dgpu_procs LUB external.
+        // Twarda promocja: focused class ∈ dgpu_hard LUB external LUB dgpu_procs
+        // (bez tytułu — v5.6 przeglądarki usunięte z [dgpu-hard]).
         bool hard = false;
         if (!in.focused_class.empty() && cfg.dgpu_hard.count(in.focused_class)) hard = true;
         if (in.external_display) hard = true;
@@ -1910,19 +1941,37 @@ public:
                 if (cfg.dgpu_procs.count(c)) { hard = true; break; }
         }
 
+        // v5.6: promocja tytułowa — karta Discord/YouTube w przeglądarce → dGPU,
+        // ALE NIE jest zapinką: busy < title_idle_busy → demote do iGPU.
+        bool title_promo = false;
+        if (!in.focused_title.empty()) {
+            for (auto& t : cfg.preferred_titles)
+                if (icontains(in.focused_title, t)) { title_promo = true; break; }
+        }
+        // KOREKTA busy_known: busy z PMU jest miarodajny TYLKO gdy dGPU jest ON.
+        // Gdy target_==IGPU (dGPU OFF), pętla główna wymusza busy=0 (PMU martwej
+        // karty) — to NIE sygnał idle, tylko brak pomiaru. Bez tego zabezpieczenia
+        // promocja tytułowa nigdy by nie wystartowała z OFF (idle_title=zawsze).
+        const bool busy_known = (target_ == DGPU);
+        const bool idle_title = busy_known && (int)in.busy < cfg.title_idle_busy * 10;  // ‰
+
         // Miękka promocja: focused class ∈ dgpu_soft AND busy > busy_enter.
         bool soft = !in.focused_class.empty() && cfg.dgpu_soft.count(in.focused_class) &&
                     (int)in.busy > cfg.busy_enter * 10;
 
-        // Democja: focused class ∈ igpu LUB busy < busy_exit.
-        bool demote = (!in.focused_class.empty() && cfg.igpu.count(in.focused_class)) ||
-                      (int)in.busy < cfg.busy_exit * 10;
+        // v5.6 demote_sig (uproszczone wg usera): focus na NIE-Discord/YT →
+        // demote po 1 s ZAWSZE (niezależnie od busy) — downclock do 07 robi
+        // [dgpu-active], power-off robi switchd; busy < busy_exit jest pokryte
+        // przez !title_promo. Focus na Discord/YT → demote tylko gdy idle_title
+        // (busy_known && busy < title-idle-busy). igpu-class zostaje dla [igpu].
+        bool demote_sig = !title_promo || idle_title ||
+                          (!in.focused_class.empty() && cfg.igpu.count(in.focused_class));
 
-        // Dwell countery.
+        // Dwell countery (miękka promocja — busy-gated).
         dwell_in_ = (soft && thermal_ok) ? dwell_in_ + tick_ms : 0;
 
-        // Twarda promocja — natychmiast (cooldown-gated). Sygnał twardy trzyma
-        // dGPU NAWET gdy temp >= temp_gate (gate termiczny blokuje promocję,
+        // Twarda promocja — latch (jak dotychczas, early return). Sygnał twardy
+        // trzyma dGPU NAWET gdy temp >= temp_gate (gate termiczny blokuje promocję,
         // ale nie demotuj pod aktywnym wymaganiem — inaczej flapping).
         if (hard) {
             dwell_out_ = 0;   // promocja kasuje sygnał demote
@@ -1938,6 +1987,19 @@ public:
             return target_;
         }
 
+        // v5.6: promocja tytułowa — aktywna karta Discord/YT → dGPU (cooldown-
+        // gated), BEZ early-return (idle może zwolnić). Gdy dGPU OFF (busy nie-
+        // znane) promuj na sam tytuł; gdy ON, nie promuj/trzymaj gdy idle
+        // (anti-flapping). dwell_out_ zerowany póki aktywna → demote nie tyka.
+        if (title_promo && !idle_title) {
+            dwell_out_ = 0;
+            if (target_ != DGPU && thermal_ok &&
+                since(last_demote_) >= cfg.cooldown_ms) {
+                last_promote_ = now;
+                target_ = DGPU;
+            }
+        }
+
         // Miękka promocja — busy-gated przez dwell_in.
         if (soft && thermal_ok && dwell_in_ >= cfg.dwell_in_ms) {
             dwell_out_ = 0;   // promocja kasuje sygnał demote
@@ -1951,14 +2013,13 @@ public:
         }
 
         // Democja — po min-residence, przez dwell_out.
-        dwell_out_ = (demote && target_ == DGPU) ? dwell_out_ + tick_ms : 0;
-        if (demote && target_ == DGPU &&
+        dwell_out_ = (target_ == DGPU && demote_sig) ? dwell_out_ + tick_ms : 0;
+        if (target_ == DGPU && demote_sig &&
             since(last_promote_) >= cfg.min_residence_ms &&
             dwell_out_ >= cfg.dwell_out_ms) {
             target_ = IGPU;
             last_demote_ = now;
             dwell_out_ = 0;
-            return target_;
         }
 
         return target_;
@@ -2141,9 +2202,10 @@ public:
     void tick(HyprCtl& hypr, int temp, uint32_t last_busy)
     {
         // Własne hyprctl (activewindow) — niezależne od pollingu pstate.
+        // v5.6: tytuł okna przekazywany do polityki — promocja tytułowa
+        // Discord/YouTube ([preferred-titles]) w decide().
         std::string fcs, ftitle;
         bool a1 = hypr.activewindow(fcs, ftitle);
-        (void)ftitle;   // tytuł nieużywany w polityce switchd
 
         // v5.0: dgpu-override — flag-file /run/reclockd/dgpu-override (on|off),
         // wzorzec fan-override (G). Plik istnieje → wymusza target, policy.decide()
@@ -2168,6 +2230,7 @@ public:
             }
             SwitchPolicy::Input in;
             in.focused_class = a1 ? fcs : "";
+            in.focused_title = a1 ? ftitle : "";
             in.consumers = dgpu_consumers();
             in.busy = last_busy;
             in.temp = temp;
@@ -2547,11 +2610,14 @@ private:
 static void usage(const char* argv0)
 {
     std::printf(
-        "reclockd v5.4 — polityka profilowa (app-aware) + wentylatory + switchd + [dgpu-active] + override + reload + nvram cache\n"
+        "reclockd v5.6 — polityka profilowa (app-aware) + wentylatory + switchd + [dgpu-active] + switchd tune + override + reload + nvram cache\n"
         "Użycie: %s [opcje]\n"
         "  switchd (v5.0): dGPU power-state + render routing. W DIS = monitor\n"
         "    (zero zmian power). Sekcje [switch]/[dpower]/[dgpu-hard]/[dgpu-soft]\n"
         "    /[igpu]/[dgpu-procs]. Status: /run/reclockd/status.\n"
+        "  switchd tune (v5.6): przeglądarki usunięte z [dgpu-hard] — karty\n"
+        "    Discord/YouTube promują po tytule ([preferred-titles]); promocja\n"
+        "    tytułowa NIE jest zapinką (busy < title-idle-busy → demote).\n"
         "  [dgpu-active] (v5.4): trójstopniowa polityka dla CAŁEGO dGPU-ON:\n"
         "    baseline (0a) / deep idle (07) / heavy (0e). Aktywność usera przez\n"
         "    evdev (/dev/input/event*). 0e WYŁĄCZNIE busy-driven (busy>busy-enter\n"
@@ -2869,7 +2935,7 @@ int main(int argc, char** argv)
                           " evdev=" + std::to_string(input.device_count()) + " urz.";
     }
 
-    logf(1, "start v5.4: interval=%dms poll=%dms, "
+    logf(1, "start v5.6: interval=%dms poll=%dms, "
             "default[cap=%s temp-up=%d temp-down=%d], "
             "preferred[cap=%s boost=%s busy-boost=%d%% boost-dwell=%dms "
             "temp-up=%d temp-down=%d], "
