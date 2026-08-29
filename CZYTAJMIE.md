@@ -4,10 +4,12 @@
   <img src="reclocked.webp" alt="reclocked" width="70%">
 </p>
 
-> Demon governor pstate w przestrzeni użytkownika (`reclocked`) plus łatki
-> jądra i Mesa, które utrzymują starą kartę NVIDIA GT 750M (Kepler, GK107) na
-> użytecznych taktowaniach pod otwartym sterownikiem **nouveau** — zamiast
-> tkwić na taktowaniach rozruchowych i tracić 2-4x wydajności.
+> Demon w przestrzeni użytkownika (`reclocked`) plus łatki jądra i Mesa dla
+> dual-GPU MacBooka Pro: automatyczny reclocking pstate utrzymuje starą kartę
+> NVIDIA GT 750M (Kepler, GK107) na użytecznych taktowaniach pod otwartym
+> sterownikiem **nouveau** — zamiast tkwić na taktowaniach rozruchowych i
+> tracić 2-4x wydajności — a moduł **switchd** włącza i wyłącza dGPU
+> dynamicznie (przełączanie GPU w locie, topologia IGD).
 
 > English: [README.md](README.md)
 
@@ -18,7 +20,12 @@
 `reclocked` to mały, samodzielny demon w C++17 plus łatki jądra i Mesa, które
 dostarczają automatyczny reclocking dla NVIDIA Kepler (GK107) pod nouveau —
 bez zastrzeżonego sterownika, bez governor w jądrze i bez wsparcia reclocku
-ze strony upstream.
+ze strony upstream. Od v5.0 zajmuje się też **dynamicznym przełączaniem GPU**
+(switchd): w topologii IGD dGPU jest wyłączany, gdy nic go nie potrzebuje, i
+włączany na żądanie — polityka klas okien, tytułów (karty Discord/YouTube) i
+procesów, z bramkami obciążenia, temperatury i aktywności użytkownika — więc
+codzienny pulpit działa na Intelu, a GT 750M budzi się tylko na wideo, gry czy
+CUDA.
 
 ---
 
@@ -39,6 +46,15 @@ dostarczył dla Keplera. Działa jako usługa systemd, współistnieje z
 kompozytorem Wayland (patrz [Problem DRM master](#problem-drm-master-i-dlaczego-reclocked-go-zrzuca)),
 i obsługuje profile zależne od aplikacji (np. cap niskie dla terminala, pozwól
 na boost dla przeglądarki).
+
+Na dual-GPU MacBookach Apple (Intel iGPU + NVIDIA dGPU na multiplekserze
+`gmux`) demon rozwiązuje też drugą połowę równania mocy: **switchd** (v5.0)
+włącza i wyłącza dGPU **w czasie działania**. W topologii IGD panel prowadzi
+iGPU, a dGPU startuje odcięty od zasilania; switchd promuje go na żądanie —
+klasa okna (`[dgpu-hard]`), tytuł okna (`[preferred-titles]`: karty
+Discord/YouTube) lub proces (`[dgpu-procs]`) — z bramkami busy i termiki, i
+demotuje z powrotem do OFF, gdy obciążenie znika. Drabinka pstate dotyczy
+dGPU, dopóki jest obudzony.
 
 To **nie** jest zamiennik brakującego governor w jądrze nouveau — to praktyczne
 obejście działające tylko w czasie działania (runtime-only), dla sprzętu, który
@@ -61,8 +77,9 @@ otwartych sterownikach graficznych:
 W kombinacji te MacBooki Pro z tej generacji są wycofywane jako
 **elektrośmieci**, bo „nie da się użyć dGPU porządnie pod Linuksem". `reclocked`
 to próba zmiany tego: działający stos auto-reclocku (demon + łatka jądra +
-łatka Mesa), który utrzymuje laptopa z 2013 z Keplerem jako używalną maszynę
-codzienną w 2026. Z elektrośmieci do używalności.
+łatka Mesa) plus dynamiczne przełączanie GPU, który utrzymuje laptopa z 2013
+z Keplerem jako używalną maszynę codzienną w 2026. Z elektrośmieci do
+używalności.
 
 ---
 
@@ -339,6 +356,7 @@ reclocked/
 ├── LICENSE                         MIT
 ├── README.md                       ten plik (EN)
 ├── CZYTAJMIE.md                    ten plik (PL)
+├── reclocked.webp                  logo projektu
 ├── .gitignore
 ├── examples/
 │   ├── reclocked.conf.pl            domyślny config — komentarze PL
@@ -349,24 +367,26 @@ reclocked/
 │   ├── reclocked.conf               domyślny config (profile, progi, [switch])
 │   ├── reclocked.service            jednostka systemd (instaluje się do /etc/systemd/system/)
 │   └── reclockctl                  wrapper CLI dla systemctl + pstate.sh (+ switchd)
-├── patches/
-│   ├── 0001-nouveau-auto-reclock.patch   polityka auto-reclocku w jądrze nouveau
-│   ├── 0002-mesa-nvc0-sched-data.patch   dane latencji schedulera Mesa nvc0
-│   ├── 0003-reclocked-caps-ceiling.patch  reclocked v4.4 polityka per-klasowa [caps]
-│   ├── 0004-reclocked-s3-selfheal.patch   reclocked v4.5 samouzdrawianie liczników busy po S3
-│   ├── 0005-reclocked-compiler-fan.patch  reclocked v4.6 wykryty kompilator → wiatraki 100%
-│   ├── 81-nouveau-kepler.rules           reguła udev: wymuś nouveau (omija blacklist nvidia-utils)
-│   ├── reclocked.conf-caps.diff           diff reclocked.conf — [caps] Discord 0a/0e busy-gated
-│   ├── reclocked.conf-compiler.diff       diff reclocked.conf — [compiler] boost wiatraków
-│   └── kernel/                           seria kernelowa MacBook Pro 11,3 0002-0015
-├── install-udev-rule.sh            instaluje powyższą regułę udev
-├── pstate.sh                       inspekcja/wymuszanie pstate przez debugfs (+ iGPU RPS / coretemp)
-├── build-mesa.sh                   budowanie patchowanego Mesa (tylko nouveau)
-├── mesa-manage.sh                  instalacja/rollback patchowanego sterownika Mesa
-├── recover-gpu.sh                  ratunkowe odzyskiwanie, gdy zepsuje się wyświetlanie
-├── build-kernel.sh                 budowa + instalacja patchowanego jądra nvkp
-├── build-uki-nvkp.sh               budowa UKI (vmlinuz+initramfs+cmdline) dla Limine protocol: efi
-└── bench-gpu.sh                    powtarzalny benchmark glmark2 iGPU-vs-dGPU (full-res, offscreen)
+├── scripts/
+│   ├── pstate.sh                    inspekcja/wymuszanie pstate przez debugfs (+ iGPU RPS / coretemp)
+│   ├── reclocked-rebuild.sh         przebudowa src/reclocked + restart usługi (zero warningów)
+│   ├── bench-gpu.sh                 powtarzalny benchmark glmark2 iGPU-vs-dGPU (full-res, offscreen)
+│   ├── build-kernel.sh              budowa + instalacja patchowanego jądra nvkp
+│   ├── build-uki-nvkp.sh            budowa UKI (vmlinuz+initramfs+cmdline) dla Limine protocol: efi
+│   ├── build-mesa.sh                budowanie patchowanego Mesa (tylko nouveau)
+│   ├── mesa-manage.sh               instalacja/rollback patchowanego sterownika Mesa
+│   ├── recover-gpu.sh               ratunkowe odzyskiwanie, gdy zepsuje się wyświetlanie
+│   └── install-udev-rule.sh         instaluje powyższą regułę udev
+└── patches/
+    ├── 0001-nouveau-auto-reclock.patch   polityka auto-reclocku w jądrze nouveau
+    ├── 0002-mesa-nvc0-sched-data.patch   dane latencji schedulera Mesa nvc0
+    ├── 0003-reclocked-caps-ceiling.patch  reclocked v4.4 polityka per-klasowa [caps]
+    ├── 0004-reclocked-s3-selfheal.patch   reclocked v4.5 samouzdrawianie liczników busy po S3
+    ├── 0005-reclocked-compiler-fan.patch  reclocked v4.6 wykryty kompilator → wiatraki 100%
+    ├── 81-nouveau-kepler.rules           reguła udev: wymuś nouveau (omija blacklist nvidia-utils)
+    ├── reclocked.conf-caps.diff           diff reclocked.conf — [caps] Discord 0a/0e busy-gated
+    ├── reclocked.conf-compiler.diff       diff reclocked.conf — [compiler] boost wiatraków
+    └── kernel/                           seria kernelowa MacBook Pro 11,3 0002-0015
 ```
 
 ---

@@ -4,10 +4,13 @@
   <img src="reclocked.webp" alt="reclocked" width="70%">
 </p>
 
-> A userspace pstate governor daemon (`reclocked`) plus kernel and Mesa patches
-> that keep an old NVIDIA GT 750M (Kepler, GK107) running at usable clocks
-> under the open-source **nouveau** driver — instead of sitting at boot clocks
-> and losing 2-4x performance.
+> A userspace daemon (`reclocked`) plus kernel and Mesa patches for a dual-GPU
+> MacBook Pro: automatic pstate reclocking keeps the NVIDIA GT 750M (Kepler,
+> GK107) running at usable clocks under the open-source **nouveau** driver —
+> instead of sitting at boot clocks and losing 2-4x performance — and
+> **switchd** powers the dGPU on and off dynamically (GPU switching in the IGD
+> topology), so the machine runs on the Intel iGPU by default and the GT 750M
+> only wakes when something needs it.
 
 > Polski: [CZYTAJMIE.md](CZYTAJMIE.md)
 
@@ -18,7 +21,12 @@
 `reclocked` is a small, self-contained C++17 userspace daemon plus kernel and
 Mesa patches that bring automatic pstate reclocking to NVIDIA Kepler (GK107)
 under nouveau — without any proprietary driver, kernel governor, or reclock
-from the upstream stack.
+from the upstream stack. Since v5.0 it also handles **dynamic GPU switching**
+(switchd): in the IGD topology the dGPU is powered down when nothing needs it
+and powered back on on demand — window class, title (Discord/YouTube tabs) or
+process policy, gated by busy, temperature and user activity — so the daily
+desktop runs on the Intel iGPU and the GT 750M wakes only for video, games or
+CUDA.
 
 ---
 
@@ -37,6 +45,15 @@ nouveau upstream never shipped for Kepler. It runs as a systemd service, coexist
 with a Wayland compositor (see [The DRM master problem](#the-drm-master-problem-and-why-reclocked-drops-it)),
 and supports app-aware profiles (e.g. cap low for a terminal, allow boost for a
 browser).
+
+On dual-GPU Apple laptops (Intel iGPU + NVIDIA dGPU on a `gmux` mux) the daemon
+also solves the second half of the power equation: **switchd** (v5.0) powers
+the dGPU **on and off at runtime**. In the IGD topology the iGPU drives the
+panel and the dGPU starts power-cut; switchd promotes it on demand — window
+class (`[dgpu-hard]`), window title (`[preferred-titles]`: Discord/YouTube
+tabs) or process (`[dgpu-procs]`) — gated by busy and temperature, and demotes
+it back to OFF when the workload leaves. The pstate ladder then applies to the
+dGPU while it is awake.
 
 This is **not** a replacement for the missing nouveau kernel governor — it is a
 practical, runtime-only workaround for hardware that nouveau has effectively
@@ -58,8 +75,8 @@ open-source graphics:
 The combination means this generation of MacBook Pros is being retired as
 **e-waste** because "you can't use the dGPU properly on Linux." `reclocked` is
 the attempt to change that: a working auto-reclock stack (daemon + kernel patch +
-Mesa patch) that keeps a 2013 Kepler laptop usable as a daily driver in 2026.
-From e-waste to usable.
+Mesa patch) plus dynamic GPU switching that keeps a 2013 Kepler laptop usable
+as a daily driver in 2026. From e-waste to usable.
 
 ---
 
@@ -321,6 +338,7 @@ starts. Proven by coexistence with Hyprland on this hardware.
 reclocked/
 ├── LICENSE                         MIT
 ├── README.md                       this file
+├── reclocked.webp                  project logo
 ├── .gitignore
 ├── examples/
 │   ├── reclocked.conf.pl            default config — Polish comments
@@ -331,24 +349,26 @@ reclocked/
 │   ├── reclocked.conf               default config (profiles, thresholds, [switch])
 │   ├── reclocked.service            systemd unit (installs to /etc/systemd/system/)
 │   └── reclockctl                  CLI wrapper for systemctl + pstate.sh (+ switchd)
-├── patches/
-│   ├── 0001-nouveau-auto-reclock.patch   nouveau kernel auto-reclock policy
-│   ├── 0002-mesa-nvc0-sched-data.patch   Mesa nvc0 scheduler latency data
-│   ├── 0003-reclocked-caps-ceiling.patch  reclocked v4.4 per-class [caps] policy
-│   ├── 0004-reclocked-s3-selfheal.patch   reclocked v4.5 self-healing busy counters after S3
-│   ├── 0005-reclocked-compiler-fan.patch  reclocked v4.6 compiler detected → fans 100%
-│   ├── 81-nouveau-kepler.rules           udev rule: force-load nouveau (bypass nvidia-utils blacklist)
-│   ├── reclocked.conf-caps.diff           reclocked.conf diff — [caps] Discord 0a/0e busy-gated
-│   ├── reclocked.conf-compiler.diff       reclocked.conf diff — [compiler] fan boost
-│   └── kernel/                           MacBook Pro 11,3 kernel series 0002-0015
-├── install-udev-rule.sh            installs the udev rule above
-├── pstate.sh                       inspect/force pstate via debugfs (+ iGPU RPS / coretemp)
-├── build-mesa.sh                   build patched Mesa (nouveau-only)
-├── mesa-manage.sh                  install/rollback patched Mesa driver
-├── recover-gpu.sh                  emergency recovery if display breaks
-├── build-kernel.sh                 build + install the patched nvkp kernel
-├── build-uki-nvkp.sh               build UKI (vmlinuz+initramfs+cmdline) for Limine protocol: efi
-└── bench-gpu.sh                    repeatable glmark2 iGPU-vs-dGPU benchmark (full-res, offscreen)
+├── scripts/
+│   ├── pstate.sh                    inspect/force pstate via debugfs (+ iGPU RPS / coretemp)
+│   ├── reclocked-rebuild.sh         rebuild src/reclocked + restart the service (zero warnings)
+│   ├── bench-gpu.sh                 repeatable glmark2 iGPU-vs-dGPU benchmark (full-res, offscreen)
+│   ├── build-kernel.sh              build + install the patched nvkp kernel
+│   ├── build-uki-nvkp.sh            build UKI (vmlinuz+initramfs+cmdline) for Limine protocol: efi
+│   ├── build-mesa.sh                build patched Mesa (nouveau-only)
+│   ├── mesa-manage.sh               install/rollback patched Mesa driver
+│   ├── recover-gpu.sh               emergency recovery if display breaks
+│   └── install-udev-rule.sh         installs the udev rule above
+└── patches/
+    ├── 0001-nouveau-auto-reclock.patch   nouveau kernel auto-reclock policy
+    ├── 0002-mesa-nvc0-sched-data.patch   Mesa nvc0 scheduler latency data
+    ├── 0003-reclocked-caps-ceiling.patch  reclocked v4.4 per-class [caps] policy
+    ├── 0004-reclocked-s3-selfheal.patch   reclocked v4.5 self-healing busy counters after S3
+    ├── 0005-reclocked-compiler-fan.patch  reclocked v4.6 compiler detected → fans 100%
+    ├── 81-nouveau-kepler.rules           udev rule: force-load nouveau (bypass nvidia-utils blacklist)
+    ├── reclocked.conf-caps.diff           reclocked.conf diff — [caps] Discord 0a/0e busy-gated
+    ├── reclocked.conf-compiler.diff       reclocked.conf diff — [compiler] fan boost
+    └── kernel/                           MacBook Pro 11,3 kernel series 0002-0015
 ```
 
 ---
