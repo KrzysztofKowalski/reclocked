@@ -1,5 +1,9 @@
 # reclocked
 
+<p align="center">
+  <img src="reclocked.webp" alt="reclocked" width="70%">
+</p>
+
 > Demon governor pstate w przestrzeni użytkownika (`reclocked`) plus łatki
 > jądra i Mesa, które utrzymują starą kartę NVIDIA GT 750M (Kepler, GK107) na
 > użytecznych taktowaniach pod otwartym sterownikiem **nouveau** — zamiast

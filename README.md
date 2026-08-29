@@ -1,5 +1,9 @@
 # reclocked
 
+<p align="center">
+  <img src="reclocked.webp" alt="reclocked" width="70%">
+</p>
+
 > A userspace pstate governor daemon (`reclocked`) plus kernel and Mesa patches
 > that keep an old NVIDIA GT 750M (Kepler, GK107) running at usable clocks
 > under the open-source **nouveau** driver — instead of sitting at boot clocks
