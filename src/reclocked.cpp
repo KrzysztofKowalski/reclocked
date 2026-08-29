@@ -3613,7 +3613,7 @@ int main(int argc, char** argv)
                           " evdev=" + std::to_string(input.device_count()) + " urz.";
     }
 
-    logf(1, "start v5.10: interval=%dms poll=%dms, "
+    logf(1, "start v5.13: interval=%dms poll=%dms, "
             "default[cap=%s temp-up=%d temp-down=%d], "
             "preferred[cap=%s boost=%s busy-boost=%d%% boost-dwell=%dms "
             "temp-up=%d temp-down=%d], "
