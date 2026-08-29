@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# reclockctl — wrapper kontroli daemona reclockd (systemd)
+# reclockctl — wrapper kontroli daemona reclocked (systemd)
 # Użycie: reclockctl {start|stop|status|restart|reload|logs|fan-on|fan-off|switch-status|dgpu-on|dgpu-off|dgpu-auto|to-igd|to-dis}
-#   start        — systemctl start reclockd
-#   stop         — systemctl stop reclockd (SIGTERM → restore exit-state + fan auto)
-#   status       — systemctl status reclockd + pstate.sh status + wentylatory
-#   restart      — systemctl restart reclockd
-#   reload       — systemctl kill -s HUP reclockd (re-read configu bez restartu)
-#   logs         — journalctl -u reclockd -f
+#   start        — systemctl start reclocked
+#   stop         — systemctl stop reclocked (SIGTERM → restore exit-state + fan auto)
+#   status       — systemctl status reclocked + pstate.sh status + wentylatory
+#   restart      — systemctl restart reclocked
+#   reload       — systemctl kill -s HUP reclocked (re-read configu bez restartu)
+#   logs         — journalctl -u reclocked -f
 #   fan-on       — usuń flag-file fan-override (daemon przejmuje auto wentylatorów)
 #   fan-off      — utwórz flag-file fan-override (zamroź auto; steruj ręcznie fanN_manual/fanN_output)
 #   switch-status — status switchd (v5.0): topologia, power dGPU, target, nvram_prefs
@@ -18,8 +18,8 @@ set -e
 CMD="${1:-status}"
 
 # ---------- helper: wyciągnij wartość pola z pliku JSON (bez jq) ----------
-# /run/reclockd/status (daemon v5.0) to JSON — prosty ekstraktor stringów i
-# liczb (wzorzec json_str z reclockd.cpp; bez zależności od jq).
+# /run/reclocked/status (daemon v5.0) to JSON — prosty ekstraktor stringów i
+# liczb (wzorzec json_str z reclocked.cpp; bez zależności od jq).
 json_get() { # <plik> <klucz>
   local f="$1" k="$2" line v
   line="$(tr -d '\n' < "$f" 2>/dev/null)"
@@ -91,15 +91,15 @@ nvram_reboot() { # <opis>
 
 case "$CMD" in
   start)
-    sudo -n systemctl start reclockd
-    echo "reclockd uruchomiony"
+    sudo -n systemctl start reclocked
+    echo "reclocked uruchomiony"
     ;;
   stop)
-    sudo -n systemctl stop reclockd
-    echo "reclockd zatrzymany (restore exit-state)"
+    sudo -n systemctl stop reclocked
+    echo "reclocked zatrzymany (restore exit-state)"
     ;;
   status)
-    sudo -n systemctl status reclockd --no-pager 2>&1 || true
+    sudo -n systemctl status reclocked --no-pager 2>&1 || true
     echo "---"
     pstate.sh status
     echo "--- wentylatory (applesmc) ---"
@@ -112,10 +112,10 @@ case "$CMD" in
         "$(cat $fb/fan${n}_min 2>/dev/null || echo '?')" \
         "$(cat $fb/fan${n}_max 2>/dev/null || echo '?')"
     done
-    [ -f /run/reclockd/fan-override ] && echo "fan-override: AKTYWNY (auto zamrożone)" || echo "fan-override: brak (auto)"
+    [ -f /run/reclocked/fan-override ] && echo "fan-override: AKTYWNY (auto zamrożone)" || echo "fan-override: brak (auto)"
     # v5.10: termika obudowy ([fan-case]) — średnia °C + stan SOAK (z JSON statusu;
     # brak pól przy starym daemonie → pomiń)
-    f="/run/reclockd/status"
+    f="/run/reclocked/status"
     ca="$(json_get "$f" fan_case_avg)"
     cs="$(json_get "$f" fan_case_state)"
     if [ -n "$ca" ]; then
@@ -123,7 +123,7 @@ case "$CMD" in
     fi
     ;;
   switch-status)
-    f="/run/reclockd/status"
+    f="/run/reclocked/status"
     if [ ! -f "$f" ]; then
       echo "brak $f — daemon v5.0 (switchd) nieaktywny?" >&2
       exit 1
@@ -140,34 +140,34 @@ case "$CMD" in
     fi
     ;;
   restart)
-    sudo -n systemctl restart reclockd
-    echo "reclockd zrestartowany"
+    sudo -n systemctl restart reclocked
+    echo "reclocked zrestartowany"
     ;;
   reload)
-    sudo -n systemctl kill -s HUP reclockd
-    echo "SIGHUP wysłany — daemon re-readuje config (/etc/reclockd.conf)"
+    sudo -n systemctl kill -s HUP reclocked
+    echo "SIGHUP wysłany — daemon re-readuje config (/etc/reclocked.conf)"
     ;;
   fan-off)
-    sudo -n mkdir -p /run/reclockd
-    sudo -n touch /run/reclockd/fan-override
+    sudo -n mkdir -p /run/reclocked
+    sudo -n touch /run/reclocked/fan-override
     echo "fan-override UTWORZONY — auto wentylatorów zamrożone (steruj ręcznie: fanN_manual=1 + fanN_output w sysfs)"
     ;;
   fan-on)
-    sudo -n rm -f /run/reclockd/fan-override
+    sudo -n rm -f /run/reclocked/fan-override
     echo "fan-override ZDJĘTY — daemon przejmuje auto wentylatorów"
     ;;
   dgpu-on)
-    sudo -n mkdir -p /run/reclockd
-    printf 'on\n' | sudo -n tee /run/reclockd/dgpu-override >/dev/null
+    sudo -n mkdir -p /run/reclocked
+    printf 'on\n' | sudo -n tee /run/reclocked/dgpu-override >/dev/null
     echo "dgpu-override: ON — dGPU wymuszony włączony (daemon trzyma power ON)"
     ;;
   dgpu-off)
-    sudo -n mkdir -p /run/reclockd
-    printf 'off\n' | sudo -n tee /run/reclockd/dgpu-override >/dev/null
+    sudo -n mkdir -p /run/reclocked
+    printf 'off\n' | sudo -n tee /run/reclocked/dgpu-override >/dev/null
     echo "dgpu-override: OFF — dGPU wymuszony wyłączony (daemon trzyma power OFF)"
     ;;
   dgpu-auto)
-    sudo -n rm -f /run/reclockd/dgpu-override
+    sudo -n rm -f /run/reclocked/dgpu-override
     echo "dgpu-override ZDJĘTY — daemon wraca do auto (polityka switchd)"
     ;;
   to-igd)
@@ -179,7 +179,7 @@ case "$CMD" in
     nvram_reboot "DIS (dGPU)"
     ;;
   logs)
-    sudo -n journalctl -u reclockd -f --no-pager
+    sudo -n journalctl -u reclocked -f --no-pager
     ;;
   -h|--help|help)
     cat <<'EOF'

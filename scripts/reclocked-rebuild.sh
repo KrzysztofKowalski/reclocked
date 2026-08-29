@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Rekompilacja reclockd (wymóg: ZERO warningów) + restart daemona systemd + status daemona.
-# Użycie: reclockd-rebuild.sh [--reload]
+# Rekompilacja reclocked (wymóg: ZERO warningów) + restart daemona systemd + status daemona.
+# Użycie: reclocked-rebuild.sh [--reload]
 #   (bez arg.)  rebuild + restart + status;   --reload  SIGHUP bez rebuilda
 set -euo pipefail
 cd "$(dirname "$0")"
 
-BUILD_DIR="reclockd"
+BUILD_DIR="reclocked"
 
 # Buduje $1; przy błędzie kompilacji lub jakimkolwiek "warning:" w output → exit 1 bez restartu.
 build_one() {
@@ -26,18 +26,18 @@ build_one() {
 }
 
 restart_daemon() {
-    echo "== restart reclockd =="
-    sudo systemctl restart reclockd
+    echo "== restart reclocked =="
+    sudo systemctl restart reclocked
     sleep 3
-    if ! systemctl is-active --quiet reclockd; then
-        echo "== BŁĄD: reclockd nie jest active po restarcie ==" >&2
-        systemctl status reclockd --no-pager >&2 || true
+    if ! systemctl is-active --quiet reclocked; then
+        echo "== BŁĄD: reclocked nie jest active po restarcie ==" >&2
+        systemctl status reclocked --no-pager >&2 || true
         exit 1
     fi
     echo "== log startu =="
-    sudo journalctl -u reclockd --since "10 sec ago" --no-pager | grep -E "start v|BŁĄD|error" | tail -5 || true
+    sudo journalctl -u reclocked --since "10 sec ago" --no-pager | grep -E "start v|BŁĄD|error" | tail -5 || true
     echo "== status =="
-    sudo cat /run/reclockd/status || true
+    sudo cat /run/reclocked/status || true
 }
 
 case "${1:-}" in
@@ -46,10 +46,10 @@ case "${1:-}" in
         restart_daemon
         ;;
     --reload)
-        echo "== reload reclockd (SIGHUP, bez rebuilda) =="
-        sudo systemctl kill -s HUP reclockd
+        echo "== reload reclocked (SIGHUP, bez rebuilda) =="
+        sudo systemctl kill -s HUP reclocked
         sleep 1
-        sudo journalctl -u reclockd --since "5 sec ago" --no-pager | grep -E "SIGHUP|config" | tail -3 || true
+        sudo journalctl -u reclocked --since "5 sec ago" --no-pager | grep -E "SIGHUP|config" | tail -3 || true
         ;;
     *)
         echo "Użycie: $0 [--reload]" >&2

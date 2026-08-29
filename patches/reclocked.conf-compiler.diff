@@ -1,7 +1,7 @@
-diff --git a/reclockd/reclockd.conf b/reclockd/reclockd.conf
+diff --git a/src/reclocked.conf b/src/reclocked.conf
 index 0c7d246..f7190cf 100644
---- a/reclockd/reclockd.conf
-+++ b/reclockd/reclockd.conf
+--- a/src/reclocked.conf
++++ b/src/reclocked.conf
 @@ -99,4 +99,19 @@ gr-idle-promille = 300
  [fan]
  enable = true

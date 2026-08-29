@@ -1,7 +1,7 @@
-diff --git a/reclockd/reclockd.cpp b/reclockd/reclockd.cpp
+diff --git a/src/reclocked.cpp b/src/reclocked.cpp
 index 955d778..05b741d 100644
---- a/reclockd/reclockd.cpp
-+++ b/reclockd/reclockd.cpp
+--- a/src/reclocked.cpp
++++ b/src/reclocked.cpp
 @@ -103,6 +103,18 @@
  //      baza 0a, busy>50% → 0e, idle → 0a. TERMAL nadal nadrzędny (zejście
  //      nawet poniżej floor). Karta Discord w przeglądarce (chromium/firefox)

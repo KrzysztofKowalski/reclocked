@@ -22,7 +22,7 @@
 #   * ON-SCREEN: zablokuj kompozytor Omarchy/Hyprland przed biegiem (np.
 #     hyprctl dispatch lock) — screen jest z założenia mniej wiarygodny.
 #   * iGPU RPS — NIE pinujemy (auto). dGPU pinujemy debugfs pstate przy
-#     zatrzymanym daemonie — inaczej reclockd negocjuje ceiling w trakcie biegu
+#     zatrzymanym daemonie — inaczej reclocked negocjuje ceiling w trakcie biegu
 #     i realny pstate ≠ ustawiony (raport 78, anomalia).
 #   * Wiatraki manual 100% — fan1_max=6156, fan2_max=5700 RPM (SEPARATNIE,
 #     maksima są różne; nie wpisujemy tej samej wartości).
@@ -40,12 +40,12 @@
 #     -n | --dry-run                    (tylko pokaż komendy, nie wykonuj)
 #     -h | --help
 #
-# Restore (trap EXIT, najwyższy priorytet): wiatraki → auto, reclockd → active,
+# Restore (trap EXIT, najwyższy priorytet): wiatraki → auto, reclocked → active,
 # dGPU → Off. Skrypt idempotentny: daemon start/dgpu-on tylko gdy trzeba.
 set -uo pipefail
 
 PROJ="$(cd "$(dirname "$0")" && pwd)"
-RECLOCKCTL="${RECLOCKCTL:-$PROJ/reclockd/reclockctl}"
+RECLOCKCTL="${RECLOCKCTL:-$PROJ/reclocked/reclockctl}"
 APPLESMC="/sys/devices/platform/applesmc.768"
 VGASW="/sys/kernel/debug/vgaswitcheroo/switch"
 PSTATE_FILE="/sys/kernel/debug/dri/0000:01:00.0/pstate"
@@ -105,13 +105,13 @@ sleep_if_real() { # <sekundy> <opis>
   fi
 }
 
-# --- daemon reclockd ---------------------------------------------------------
-daemon_active() { pgrep -x reclockd >/dev/null 2>&1; }
+# --- daemon reclocked ---------------------------------------------------------
+daemon_active() { pgrep -x reclocked >/dev/null 2>&1; }
 
 daemon_wait_active() { # <timeout-s>
   local tmo="$1" i=0
   if [ "$DRY" = 1 ]; then
-    printf 'DRY-RUN: czekam na aktywny reclockd (max %s s)\n' "$tmo"
+    printf 'DRY-RUN: czekam na aktywny reclocked (max %s s)\n' "$tmo"
     return 0
   fi
   while [ "$i" -lt "$tmo" ]; do
@@ -182,7 +182,7 @@ pin_pstate() { # <07|0a|0e>
   log "pin pstate=$ps (AC memory ${mem} MHz)"
   printf '%s\n' "$ps" >"$PSTATE_FILE" 2>/dev/null \
     || { fail "zapis pstate=$ps nie powiódł się"; return 1; }
-  sleep 2   # czas na przełączenie zegarów (patche 0011-0013; reclockd timeout 2 s)
+  sleep 2   # czas na przełączenie zegarów (patche 0011-0013; reclocked timeout 2 s)
   cur="$(cat "$PSTATE_FILE" 2>/dev/null)" \
     || { fail "nie mogę odczytać $PSTATE_FILE"; return 1; }
   if ! grep -qE "^${ps}:.*\*" <<<"$cur"; then
@@ -337,7 +337,7 @@ restore() {
 
 print_summary() {
   log "== STAN KOŃCOWY =="
-  if daemon_active; then log "reclockd: active"; else log "reclockd: NIEAKTYWNY"; fi
+  if daemon_active; then log "reclocked: active"; else log "reclocked: NIEAKTYWNY"; fi
   if vgasw_is Pwr; then log "dGPU: Pwr"; elif vgasw_is Off; then log "dGPU: Off"; else log "dGPU: stan nieznany"; fi
   local m1 m2
   m1="$(cat "$APPLESMC/fan1_manual" 2>/dev/null || echo '?')"

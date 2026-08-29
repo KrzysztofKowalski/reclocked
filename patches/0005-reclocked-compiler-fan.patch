@@ -1,7 +1,7 @@
-diff --git a/reclockd/reclockd.cpp b/reclockd/reclockd.cpp
+diff --git a/src/reclocked.cpp b/src/reclocked.cpp
 index 05b741d..2e6cb2d 100644
---- a/reclockd/reclockd.cpp
-+++ b/reclockd/reclockd.cpp
+--- a/src/reclocked.cpp
++++ b/src/reclocked.cpp
 @@ -115,6 +115,19 @@
  //      Readback jest tani (mmap, co interval_ms) i bez fałszywych alarmów
  //      (nie zależy od busy/temp). Współpracuje z hookiem system-sleep

@@ -1,5 +1,5 @@
-# /etc/reclockd.conf — konfiguracja daemona reclockd v5.7 (polityka [dgpu-active] + fan + switchd)
-# Kopiuj: sudo cp reclockd.conf /etc/reclockd.conf
+# /etc/reclocked.conf — konfiguracja daemona reclocked v5.13 (polityka [dgpu-active] + fan + switchd)
+# Kopiuj: sudo cp reclocked.conf /etc/reclocked.conf
 #
 # Lista class-ów aplikacji "preferred" (hyprctl activewindow/clients .class).
 # Preferred = apka z tej listy FOCUSED LUB (RUNNING + busy > busy-up) LUB
@@ -142,7 +142,7 @@ temp-per-profile = true
 # Zakresy RPM (fanN_min/max) czytane dynamicznie z sysfs przy starcie — NIE
 # hardkodowane (fan1≈2160-6156, fan2≈2000-5700 RPM na GT 750M). Aktualizacja
 # co poll-ms (1 s). temp ≤ temp-min → min RPM (cicho), temp ≥ temp-max → max RPM.
-# fan-override (/run/reclockd/fan-override, reclockctl fan-off) zamraża auto.
+# fan-override (/run/reclocked/fan-override, reclockctl fan-off) zamraża auto.
 # restore_auto przy wyjściu → fanN_manual=0 (SMC przejmuje, fail-safe).
 # v5.1: temp-min-igd/temp-max-igd — osobna krzywa gdy włączone TYLKO iGPU
 # (dGPU OFF; temp = CPU/coretemp, bo hwmon nouveau znika). Gdy dGPU ON →
@@ -163,8 +163,8 @@ temp-mid-igd = 80
 fan-mid-igd = 70
 temp-max-igd = 90
 
-# v5.10: TERMIKA OBUDOWY (raport 97, wariant B pełny a+b+c) — wentylatory wg
-# ŚREDNIEJ temperatury obudowy (case), nie tylko max(CPU, dGPU).
+# v5.10/v5.12: TERMIKA OBUDOWY (raporty 97, 98) — wentylatory wg ŚREDNIEJ
+# temperatury obudowy (case), nie tylko max(CPU, dGPU).
 #   Pomiar    — applesmc po etykietach (tempN_label → klucz SMC); średnia
 #               arytmetyczna wartości z `keys` (m°C; wartości ujemne pomijane —
 #               niepodłączone -127000, jałowy dummy TCTD). Klawiatura NIE ma
@@ -173,24 +173,32 @@ temp-max-igd = 90
 #   Krzywa    — liniowo: case ≤ case-min → 0% (min RPM, nic nie wymusza),
 #               case ≥ case-max → 100% RPM (fan max z [fan]); max() z krzywą
 #               CPU (CPU 90°C dostaje max RPM niezależnie od case).
-#   SOAK/HOLD — case > case-min przez case-dwell-ms → SOAK na hold-ms z floor =
-#               krzywa przy case wejścia (nie spada poniżej); wyjście dopiero
-#               gdy hold minął ORAZ case < case-min−margin przez exit-dwell-ms.
-#               Realizuje "spinuj przez czas i trzymaj, aż obudowa zejdzie".
-#   v5.11: w SOAK floor ESCALUJE z aktualnym case — target = max(floor wejścia,
-#               krzywa(aktualny case)); floor z wejścia to tylko dolna granica.
+#               v5.12: case-min = 20 (decyzja usera) — fizyczne minimum obudowy
+#               (~40°C przy pracy) leży WEWNĄTRZ zakresu → krzywa mocna w
+#               strefie pracy (44°C → 60% przy case-max 60), case aktywnie
+#               schładzany do fizycznego minimum.
+#   SOAK/HOLD — PULSA: case > soak-enter (45°C — powyżej typowej strefy pracy
+#               40-44°C) przez case-dwell-ms → SOAK na hold-ms z floor =
+#               max(krzywa przy wejściu, krzywa(aktualny case)) — floor
+#               ESCALUJE z aktualnym case (v5.11, decyzja usera).
+#               WYJŚCIE CZYSTO CZASOWE (v5.12): po hold-ms bezwarunkowo NORMAL —
+#               wyjście temperaturowe (case < case-min−margin) było fizycznie
+#               nieosiągalne (17/27/37°C) → SOAK wisiał wiecznie. Re-entry gdy
+#               case znów > soak-enter (gorący → kolejna pulsa; schłodzony →
+#               stan normalny). Brak permanentnego SOAK.
 #   RAMP      — max zmiana RPM na 1 s (ramp-rpm-s); boost kompilatora i
 #               fan-override są nadrzędne i pomijają ramp (safety).
 #   enable=0  — stary algorytm wentylatorów 1:1 (escape hatch).
+#   v5.12: exit-dwell-ms/margin OBSOLETE (wyjście czasowe) — parsowane dla
+#   back-compat, można usunąć z configu.
 [fan-case]
 enable = true
 keys = Ta0P, TaSP, Th1H, Th2H, Ts0S, Ts1S, TM0P, TP0P
-case-min = 40
+case-min = 20
 case-max = 60
+soak-enter = 45
 case-dwell-ms = 5000
-hold-ms = 90000
-exit-dwell-ms = 10000
-margin = 3
+hold-ms = 300000
 hold-floor = curve
 ramp-rpm-s = 150
 
@@ -201,7 +209,7 @@ ramp-rpm-s = 150
 #   enable   — 1/0 (default 1): włącza całość
 #   fan-max  — % maksymalnych RPM (default 100 = pełne wiatraki; 50 = pół zakresu)
 #   names    — dodatkowe nazwy procesów do wykrycia (przecinkami; opcjonalne)
-# Boost działa TYLKO w auto-mode — fan-override (/run/reclockd/fan-override,
+# Boost działa TYLKO w auto-mode — fan-override (/run/reclocked/fan-override,
 # reclockctl fan-off) ma priorytet (ręczne sterowanie nie jest nadpisywane).
 # Gdy kompilator zniknie → powrót do krzywej temp (normalna ścieżka).
 # v5.8: procesy testowe (cmake -P LaunchTest.cmake/CTest, ctest, make test) NIE liczą się jako kompilator — boost tylko przy faktycznej kompilacji.
@@ -269,6 +277,12 @@ cpu-temp-gate = 70
 # Guard: busy po power-onie jest niewiarygodny przez pstate-settle-ms — escape
 # busy<5% dopiero po tym czasie (bez churnu przy CPU ≥ próg).
 cpu-temp-promote = 70
+# v5.13 (D1): gate power-off świadomy aktywności. Render fd dGPU otwarty NIE
+# blokuje power-offu, gdy busy=0 przez busy-idle-dwell-ms — chromium trzyma
+# pasywny probe fd na renderD129 NA STAŁE (busy=0, fdinfo puste, raport 99).
+# busy > 1% w oknie dwell → defer (aktywny render). Okno mierzone od ostatniej
+# próbki busy>0, resetowane przy power-on. 0 = wyłączony (gate tylko na sam fd).
+busy-idle-dwell-ms = 3000
 pstate-settle-ms = 2000
 pstate-write-timeout-ms = 2000
 

@@ -1,7 +1,7 @@
-diff --git a/reclockd/reclockd.conf b/reclockd/reclockd.conf
+diff --git a/src/reclocked.conf b/src/reclocked.conf
 index 8c5d067..0c7d246 100644
---- a/reclockd/reclockd.conf
-+++ b/reclockd/reclockd.conf
+--- a/src/reclocked.conf
++++ b/src/reclocked.conf
 @@ -17,11 +17,28 @@ brave
  # v4.1: tytuły okien "preferred" (substring case-insensitive). Discord/YouTube
  # są kartami w przeglądarce (klasa okna = przeglądarka) — treść widać w tytule.

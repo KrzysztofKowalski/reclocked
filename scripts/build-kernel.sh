@@ -15,7 +15,7 @@
 # 0015 = applesmc: kbd backlight bez default_trigger "nand-disk" — fix gasnącego
 #        podświetlenia klawiatury przy odczycie MTD (raport 80).
 #
-# Termika: kompilacja grzeje — reclockd [compiler] wykrywa gcc/make i podkręca
+# Termika: kompilacja grzeje — reclocked [compiler] wykrywa gcc/make i podkręca
 # wentylatory do 100% samoczynnie → pełne -j$(nproc) jest bezpieczne.
 #
 # Użycie:

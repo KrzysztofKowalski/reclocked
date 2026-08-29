@@ -1,6 +1,6 @@
 # reclocked
 
-> A userspace pstate governor daemon (`reclockd`) plus kernel and Mesa patches
+> A userspace pstate governor daemon (`reclocked`) plus kernel and Mesa patches
 > that keep an old NVIDIA GT 750M (Kepler, GK107) running at usable clocks
 > under the open-source **nouveau** driver — instead of sitting at boot clocks
 > and losing 2-4x performance.
@@ -26,11 +26,11 @@ it has **no automatic governor**: after boot the GPU stays at the lowest pstate
 pstate. On a GT 750M that means a 2-4x performance loss in everything from browser
 compositing to shader-bound games, with no thermal or load-aware scaling.
 
-`reclockd` fills that gap. It is a userspace daemon that polls GPU busy% (via
+`reclocked` fills that gap. It is a userspace daemon that polls GPU busy% (via
 BAR0 PMU idle counters) and temperature (via hwmon), and writes pstate transitions
 through the nouveau debugfs interface — a load-and-thermal-aware governor that
 nouveau upstream never shipped for Kepler. It runs as a systemd service, coexists
-with a Wayland compositor (see [The DRM master problem](#the-drm-master-problem-and-why-reclockd-drops-it)),
+with a Wayland compositor (see [The DRM master problem](#the-drm-master-problem-and-why-reclocked-drops-it)),
 and supports app-aware profiles (e.g. cap low for a terminal, allow boost for a
 browser).
 
@@ -73,7 +73,7 @@ was debugged and the `DROP_MASTER` fix verified against the Hyprland compositor.
   Other Kepler parts (GK104/GK106/GK208) or non-Kepler GPUs will need adaptation of
   the LADDER pstate values, the BAR0 PMU register map, and the hwmon lookup.
 - The nouveau module is loaded and the card is **runtime-active** (not
-  runtime-suspended). `reclockd` sets `power/control=on` on the PCI device for
+  runtime-suspended). `reclocked` sets `power/control=on` on the PCI device for
   the duration of its run and restores the previous value on exit.
 - **debugfs pstate access**: the kernel must expose
   `/sys/kernel/debug/dri/<bdf>/pstate` (nouveau built with
@@ -87,7 +87,7 @@ was debugged and the `DROP_MASTER` fix verified against the Hyprland compositor.
 - **systemd** (for the provided `.service` unit) or manual launch. `hyprctl`
   is optional — when present, app-aware profiles are enabled; when absent, the
   daemon falls back to the `default` profile.
-- The dGPU PCI BDF in `reclockd.cpp` defaults to `0000:01:00.0`. Adjust
+- The dGPU PCI BDF in `reclocked.cpp` defaults to `0000:01:00.0`. Adjust
   `PCI_RESOURCE`, `PSTATE_FILE`, `POWER_CTRL`, and `DRM_CARD` in the source if
   your card lives at a different address.
 
@@ -109,7 +109,7 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
 - 🔁 **Hyprland re-detect**: the daemon starts as a system service *before* the
   user session, so the `hyprctl` socket is not yet up at startup. Instead of a
   one-shot check that leaves the daemon stuck on `default` for the whole
-  session, `reclockd` re-detects Hyprland every poll cycle until the session
+  session, `reclocked` re-detects Hyprland every poll cycle until the session
   appears — app-aware profiling activates within ~1 s of login.
 - 🛑 **GR-idle gate**: a live memory downclock while the GR engine is mid-render
   can wedge the compositor (Kepler rewrites framebuffer timings mid-frame →
@@ -135,7 +135,7 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   **off-ladder** and is now **off by default** (`boost-pstate = -1`). On this
   GT 750M, `0e` and `0a` are both stable and `0f` shows no visible gain over
   `0e`, so boost is opt-in. Enable it by setting `boost-pstate = 0f` in
-  `reclockd.conf`: it only engages at the ladder ceiling (`0e`) under
+  `reclocked.conf`: it only engages at the ladder ceiling (`0e`) under
   sustained busy > `busy-boost` for `boost-dwell` with temp < `temp-up`, and
   the thermal guard drops it instantly. NVE0 lockups at max pstate are known.
 - 🎯 **Per-class `[caps]` policy (v4.4)**: a per-class `floor` / `max` /
@@ -184,19 +184,22 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   (`sw.dgpu_off()`), not the topology: OFF → iGPU curve, ON → the standard
   55-80-90 °C (3-point). `pstate.sh status` now also prints an
   `=== wentylatory ===` section — the active curve + range + RPMs from
-  `/run/reclockd/status` (applesmc sysfs fallback when the daemon is down).
-- 🌬 **Case thermal + SOAK (v5.10/v5.11)**: fans follow the **average case
+  `/run/reclocked/status` (applesmc sysfs fallback when the daemon is down).
+- 🌬 **Case thermal + SOAK (v5.10-v5.12)**: fans follow the **average case
   temperature** (`[fan-case]`, report 97) instead of just max(CPU, dGPU) —
   applesmc sensors matched by label (`keys`; the keyboard has no sensor of its
   own, TC0E/TC0F stays out as a CPU-curve duplicate), linear curve
-  `case-min`→`case-max`, and a **SOAK** state: case above `case-min` for
-  `case-dwell-ms` → the fan floor is held for `hold-ms` and only released after
-  the case drops below `case-min−margin` for `exit-dwell-ms` (thermostat — no
-  hard exit, no flapping at the threshold). v5.11: while SOAK the floor
-  **escalates** with the current case — target = max(entry floor, curve(current
-  case)); the entry floor is just the lower bound. `ramp-rpm-s` caps the RPM
-  change rate (compiler boost and fan-override stay supreme and bypass the
-  ramp). `reclockctl status` prints `fan-case: <°C> (state: soak)`.
+  `case-min`→`case-max` (v5.12: `case-min` = 20 — the physical case minimum
+  lies inside the range, the curve is strong in the working band and the case
+  is actively cooled down), and a **SOAK pulse** state: case above
+  `soak-enter` (45 °C) for `case-dwell-ms` → the fan floor is held for
+  `hold-ms` and then released **time-only** (v5.12 — the temperature exit was
+  physically unreachable and SOAK hung forever); re-entry when the case exceeds
+  `soak-enter` again. v5.11: while SOAK the floor **escalates** with the
+  current case — target = max(entry floor, curve(current case)); the entry
+  floor is just the lower bound. `ramp-rpm-s` caps the RPM change rate
+  (compiler boost and fan-override stay supreme and bypass the ramp).
+  `reclockctl status` prints `fan-case: <°C> (state: soak)`.
 - 🔀 **Browsers force the dGPU on (v5.2)**: browser classes (`chromium`,
   `firefox`, `google-chrome`, `brave`) were added to `[dgpu-hard]` — browser
   focus promotes the dGPU (power-on) with the `[preferred]` profile (pstate
@@ -227,11 +230,21 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   not Discord/YouTube demotes after 1 s regardless of busy (the downclock to `07`
   is done by `[dgpu-active]`). Switch timers shortened: `dwell-out-ms` /
   `min-residence-ms` / `cooldown-ms` / `min-switch-gap-ms` = 1000 ms.
+- 🔌 **Activity-aware power-off gate (v5.13, reports 99/100)**: an open dGPU
+  **render fd alone no longer blocks power-off** — Chromium holds a passive
+  probe fd on `renderD129` permanently (empty fdinfo, busy=0; after every
+  YouTube promotion the power-off used to hang on that fd for the process
+  lifetime, retry-loop every ~6 s, dGPU idling ON). The gate defers only while
+  the dGPU shows activity: busy > 1 % within `busy-idle-dwell-ms` (default
+  3000 ms, `[switch]`, SIGHUP-reloadable; `0` = gate on the fd alone). PMU
+  counter-loss (post-resume) → safe defer; audio PCM on the dGPU still blocks
+  hard. The idle window is measured from the last busy>0 sample and reset on
+  power-on (race guard: a client starting to render right after OFF).
 - 🌡 **Per-profile thermal guard**: thermal downclock is **per-profile**, not
   global. `default` throttles at 77°C / recovers below 52°C; `preferred`
   throttles at 85°C / recovers below 65°C. Thermal down is prioritized over
   load (and over title-priority) in both profiles.
-- 🌀 **Fan control (applesmc)**: on Apple laptops, `reclockd` also drives the
+- 🌀 **Fan control (applesmc)**: on Apple laptops, `reclocked` also drives the
   SMC fans via `/sys/devices/platform/applesmc.768/`. A two-segment temp→RPM
   curve (v5.9) is interpolated between `fanN_min` and `fanN_max`, which are
   **read dynamically from sysfs at startup** (not hardcoded): `temp-min` →
@@ -244,12 +257,12 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   `DRM_IOCTL_WAIT_VBLANK` to avoid mid-scanout glitches.
 - 🔓 **DROP_MASTER**: the daemon drops DRM master immediately after opening
   `card0` so it never blocks a Wayland compositor from taking KMS. See
-  [The DRM master problem](#the-drm-master-problem-and-why-reclockd-drops-it).
+  [The DRM master problem](#the-drm-master-problem-and-why-reclocked-drops-it).
 - ✋ **Manual override**: `pstate.sh set <pstate>` creates a flag-file at
-  `/run/reclockd/override` that freezes auto mode; `pstate.sh auto` clears it.
+  `/run/reclocked/override` that freezes auto mode; `pstate.sh auto` clears it.
   Useful for benchmarking or pinning a pstate.
 - 🔔 **SIGHUP live reload**: send `SIGHUP` (or `reclockctl reload`) to re-read
-  `/etc/reclockd.conf` without restarting the daemon.
+  `/etc/reclocked.conf` without restarting the daemon.
 - 🛡 **Fail-safe**: missing hwmon → thermal conditions skipped (never an emergency
   UP); missing applesmc → fan control disabled silently; SIGTERM → restore
   `--exit-state` and SMC fan auto; CLI overrides win over config.
@@ -257,7 +270,7 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
 
 ---
 
-## 🔓 The DRM master problem (and why reclockd drops it)
+## 🔓 The DRM master problem (and why reclocked drops it)
 
 This section documents a design problem that affects **any** userspace DRM
 utility that needs to coexist with a Wayland compositor (Hyprland, Sway, KDE,
@@ -278,7 +291,7 @@ running happily in the background holding master it never uses for rendering.
 
 ### ✅ The fix: DROP_MASTER
 
-In `drm_open()`, `reclockd` opens `card0` with `O_RDWR | O_CLOEXEC` and then
+In `drm_open()`, `reclocked` opens `card0` with `O_RDWR | O_CLOEXEC` and then
 **immediately** calls:
 
 ```c
@@ -306,23 +319,23 @@ reclocked/
 ├── README.md                       this file
 ├── .gitignore
 ├── examples/
-│   ├── reclockd.conf.pl            default config — Polish comments
-│   └── reclockd.conf.en            default config — English comments
-├── reclockd/
-│   ├── reclockd.cpp                daemon source (~3070 lines, C++17)
-│   ├── Makefile                    builds ./reclockd (no libdrm link)
-│   ├── reclockd.conf               default config (profiles, thresholds, [switch])
-│   ├── reclockd.service            systemd unit (installs to /etc/systemd/system/)
+│   ├── reclocked.conf.pl            default config — Polish comments
+│   └── reclocked.conf.en            default config — English comments
+├── src/
+│   ├── reclocked.cpp                daemon source (~4350 lines, C++17)
+│   ├── Makefile                    builds ./reclocked (no libdrm link)
+│   ├── reclocked.conf               default config (profiles, thresholds, [switch])
+│   ├── reclocked.service            systemd unit (installs to /etc/systemd/system/)
 │   └── reclockctl                  CLI wrapper for systemctl + pstate.sh (+ switchd)
 ├── patches/
 │   ├── 0001-nouveau-auto-reclock.patch   nouveau kernel auto-reclock policy
 │   ├── 0002-mesa-nvc0-sched-data.patch   Mesa nvc0 scheduler latency data
-│   ├── 0003-reclockd-caps-ceiling.patch  reclockd v4.4 per-class [caps] policy
-│   ├── 0004-reclockd-s3-selfheal.patch   reclockd v4.5 self-healing busy counters after S3
-│   ├── 0005-reclockd-compiler-fan.patch  reclockd v4.6 compiler detected → fans 100%
+│   ├── 0003-reclocked-caps-ceiling.patch  reclocked v4.4 per-class [caps] policy
+│   ├── 0004-reclocked-s3-selfheal.patch   reclocked v4.5 self-healing busy counters after S3
+│   ├── 0005-reclocked-compiler-fan.patch  reclocked v4.6 compiler detected → fans 100%
 │   ├── 81-nouveau-kepler.rules           udev rule: force-load nouveau (bypass nvidia-utils blacklist)
-│   ├── reclockd.conf-caps.diff           reclockd.conf diff — [caps] Discord 0a/0e busy-gated
-│   ├── reclockd.conf-compiler.diff       reclockd.conf diff — [compiler] fan boost
+│   ├── reclocked.conf-caps.diff           reclocked.conf diff — [caps] Discord 0a/0e busy-gated
+│   ├── reclocked.conf-compiler.diff       reclocked.conf diff — [compiler] fan boost
 │   └── kernel/                           MacBook Pro 11,3 kernel series 0002-0015
 ├── install-udev-rule.sh            installs the udev rule above
 ├── pstate.sh                       inspect/force pstate via debugfs (+ iGPU RPS / coretemp)
@@ -354,31 +367,31 @@ reclocked/
 
 ## 🔧 Installation
 
-### 1. Build reclockd
+### 1. Build reclocked
 
 ```sh
-cd reclockd
+cd src
 make
 ```
 
-This produces `reclockd/reclockd`. There is no libdrm link step; only the headers
+This produces `src/reclocked`. There is no libdrm link step; only the headers
 are needed at compile time.
 
 ### 2. Install files (system-wide)
 
 ```sh
-sudo install -m755 reclockd/reclockd      /usr/local/bin/reclockd
-sudo install -m644 reclockd/reclockd.conf /etc/reclockd.conf
-sudo install -m644 reclockd/reclockd.service /etc/systemd/system/reclockd.service
-sudo install -m755 reclockd/reclockctl    /usr/local/bin/reclockctl
-sudo install -m755 pstate.sh              /usr/local/bin/pstate.sh
+sudo install -m755 src/reclocked      /usr/local/bin/reclocked
+sudo install -m644 src/reclocked.conf /etc/reclocked.conf
+sudo install -m644 src/reclocked.service /etc/systemd/system/reclocked.service
+sudo install -m755 src/reclockctl    /usr/local/bin/reclockctl
+sudo install -m755 scripts/pstate.sh /usr/local/bin/pstate.sh
 ```
 
 ### 3. Enable and start the service
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable --now reclockd
+sudo systemctl enable --now reclocked
 ```
 
 Verify:
@@ -386,14 +399,14 @@ Verify:
 ```sh
 reclockctl status          # systemd status + pstate + temp + override
 sudo cat /sys/kernel/debug/dri/0000:01:00.0/pstate
-journalctl -u reclockd -f  # live decisions
+journalctl -u reclocked -f  # live decisions
 ```
 
 ---
 
 ## ⚙️ Configuration & Parameters
 
-`reclockd` reads `/etc/reclockd.conf` by default (override with `--config`).
+`reclocked` reads `/etc/reclocked.conf` by default (override with `--config`).
 The config is a tiny INI-line format parsed by a built-in parser (no external
 deps). CLI flags override config values.
 
@@ -458,7 +471,7 @@ mpv = floor=0a, max=0e, busy-up=50
 
 Deep sleep (S3) cuts the GPU power rail. On resume, nouveau runs a full
 `devinit`, but the PMU busy-counter config in BAR0 (`R_IDLE_CTRL` /
-`R_IDLE_MASK`) is **not restored** — `reclockd` initializes it once at
+`R_IDLE_MASK`) is **not restored** — `reclocked` initializes it once at
 startup (`init_counters()`). Without it, `sample()` returns a constant
 1000‰, which blocks the IDLE downshift and the GR-idle gate, leaving the
 daemon stuck at `0e` (report 63).
@@ -469,13 +482,13 @@ after resume), it re-runs `init_counters()`, resets the busy window and
 logs `PMU busy counters config lost (post-resume?) — reinitializing`.
 
 The `system-sleep` hook is the safety net:
-`/usr/lib/systemd/system-sleep/reclockd-resume` restarts the daemon in the
+`/usr/lib/systemd/system-sleep/reclocked-resume` restarts the daemon in the
 `post` phase, re-synchronizing the counters and the pstate index. Together
 they prevent the `0e` lockup after sleep. No config change needed.
 
 **Verify after `systemctl suspend`:** `reclockctl status` should settle back
 to `07` (not stick at `0e`), the daemon MainPID should be new (hook
-restart), and `journalctl -u reclockd -n 50` may show the reinit log.
+restart), and `journalctl -u reclocked -n 50` may show the reinit log.
 
 ### 🌬 Compiler → fans 100% (v4.6)
 
@@ -501,9 +514,9 @@ falls back to the `cmdline` basename.
 | `names`   | —       | extra process names, comma-separated (e.g. `mycc`)   |
 
 Boost only applies in **auto-mode** — a manual override (`reclockctl fan-off`,
-`/run/reclockd/fan-override`) keeps priority and is never overwritten.
+`/run/reclocked/fan-override`) keeps priority and is never overwritten.
 **Verify:** start a `make -j` or `g++` build — fans jump to max within ~1 s
-(`journalctl -u reclockd` logs
+(`journalctl -u reclocked` logs
 `fan: KOMPILATOR wykryty (cc1) -> fan1=... fan2=... (boost 100%)`); when the
 build finishes, fans return to the curve.
 
@@ -537,6 +550,7 @@ is out of scope for the gmux.
 | `class-idle-busy` | `33` | v5.6: busy% below which a `[dgpu-idle]` class (e.g. `mpv`) is 'idle' → demote to iGPU (power-off) after `dwell-out-ms`; SIGHUP-reloadable. v5.7: + `cpu-temp-gate` — a hot CPU + dGPU thermal headroom keeps the dGPU despite low busy; pause (busy < 5%) always demotes |
 | `cpu-temp-gate` | `70` | v5.7: CPU temp (°C) threshold for `[dgpu-idle]` (mpv) demote. CPU hotter than the threshold (doing something else, e.g. compiling) + dGPU below `temp-gate` (thermal headroom) → mpv stays on the dGPU. busy < 5% (pause) → always demote. `0` = disabled; SIGHUP-reloadable |
 | `cpu-temp-promote` | `70` | v5.9: CPU temp (°C) threshold for thermal offload of title cards (YT/Discord): CPU ≥ threshold → re-promotion to the dGPU without a title/focus change + demote blocked (dGPU below `temp-gate`, busy ≥ 5%) — the dGPU takes over rendering, the CPU cools down. `0` = disabled; SIGHUP-reloadable; guard: busy<5% escape only after pstate-settle-ms from promotion; for pstate-settle-ms after power-on the dGPU temp does not gate (stale read — a dGPU coming from OFF has thermal headroom by definition) |
+| `busy-idle-dwell-ms` | `3000` | v5.13 (D1): activity-aware power-off gate — an open dGPU render fd does NOT block power-off when busy=0 for this long (Chromium holds a passive probe fd on `renderD129` permanently, empty fdinfo, busy=0 — reports 99/100). busy > 1 % within the window → defer (active render); PMU counter unreliable (post-resume) → safe defer; audio PCM on the dGPU blocks hard. Window measured from the last busy>0 sample, reset on power-on. `0` = disabled (gate on the fd alone). SIGHUP-reloadable |
 | `pstate-settle-ms` | `10000` | don't write pstate after power-on — GPU clock settle after D3hot→D0 (the first clock change can hang the nouveau workqueue) |
 | `pstate-write-timeout-ms` | `2000` | pstate write runs in a separate thread; on timeout the daemon stays alive and pauses pstate writes |
 
@@ -602,24 +616,26 @@ than the dGPU, hence the separate quieter iGPU curve (defaults 33-80-90 °C,
 The curve is chosen by the dGPU **power state** (`sw.dgpu_off()`), not the
 topology.
 
-### `[fan-case]` section — case thermal + SOAK (v5.10/v5.11)
+### `[fan-case]` section — case thermal + SOAK (v5.10-v5.12)
 
 | Key | Default | Meaning |
 |---|---|---|
 | `enable` | `true` | Enable the case-thermal fan logic; `false` → legacy 1:1 fan algorithm (escape hatch). |
 | `keys` | `Ta0P, TaSP, Th1H, Th2H, Ts0S, Ts1S, TM0P, TP0P` | applesmc sensors, matched by `tempN_label`; arithmetic mean of the values (m°C; negative/unplugged readings skipped — unplugged -127000, idle dummy TCTD). The keyboard has no sensor of its own — TC0E/TC0F (board frame) is outside the set (duplicates the CPU curve). |
-| `case-min` | `40` | °C at/below which the case curve contributes 0% (physical minimum — case can't go lower with thermal propagation). |
+| `case-min` | `20` | °C at/below which the case curve contributes 0%. v5.12: 20 (user decision) — the physical case minimum (~40 °C under load) lies inside the range, so the curve is strong in the working band and the case is actively cooled to its physical minimum. |
 | `case-max` | `60` | °C at/above which the case curve demands 100% fan RPM. |
-| `case-dwell-ms` | `5000` | Case must stay above `case-min` this long before SOAK engages. |
-| `hold-ms` | `90000` | Minimum time SOAK holds the elevated floor. |
-| `exit-dwell-ms` | `10000` | Case must stay below `case-min−margin` this long (after `hold-ms`) before SOAK exits. |
-| `margin` | `3` | °C hysteresis below `case-min` for the SOAK exit. |
+| `soak-enter` | `45` | v5.12: °C above which (after `case-dwell-ms`) SOAK engages — above the typical working band (40-44 °C). |
+| `case-dwell-ms` | `5000` | Case must stay above `soak-enter` this long before SOAK engages. |
+| `hold-ms` | `300000` | SOAK pulse duration — after this the floor is released unconditionally (v5.12: time-only exit; the temperature exit was physically unreachable and SOAK hung forever). |
 | `hold-floor` | `curve` | SOAK floor at entry (v5.11: target = max(entry floor, curve(current case)) — fans keep escalating while the case is hot, never drop below the entry floor until it cools). |
 | `ramp-rpm-s` | `150` | Max RPM change per second (compiler boost and fan-override bypass the ramp — safety). |
 
+`exit-dwell-ms` / `margin` are OBSOLETE since v5.12 (the exit is time-based on
+`hold-ms`) — still parsed for back-compat, may be removed from the config.
+
 The case curve is `max()`ed with the CPU curve — a CPU at 90 °C still gets max
 RPM regardless of the case. Status: `fan_case_avg` (°C, -1 = no valid sensors)
-and `fan_case_state` (`normal`/`soak`) in `/run/reclockd/status`, also shown by
+and `fan_case_state` (`normal`/`soak`) in `/run/reclocked/status`, also shown by
 `reclockctl status`.
 
 ### `[profile default]` — non-preferred apps (terminal/editor)
@@ -699,7 +715,7 @@ temp-per-profile = true
 ### CLI flags
 
 ```
---config PATH          config file (default /etc/reclockd.conf)
+--config PATH          config file (default /etc/reclocked.conf)
 --exit-state S         pstate on exit (hex, e.g. 0a)
 --interval MS          sampling period
 --poll-ms MS           hyprctl poll period
@@ -772,12 +788,12 @@ Priority hierarchy (classic): **TERMAL > low-power terminal (→07) > title-matc
 ### `reclockctl` — daemon control
 
 ```sh
-reclockctl start          # systemctl start reclockd
-reclockctl stop           # systemctl stop reclockd (restores exit-state, SMC fan auto)
+reclockctl start          # systemctl start reclocked
+reclockctl stop           # systemctl stop reclocked (restores exit-state, SMC fan auto)
 reclockctl status         # systemd status + pstate + temp + override + fans
-reclockctl restart        # systemctl restart reclockd
-reclockctl reload         # SIGHUP — re-read /etc/reclockd.conf without restart
-reclockctl logs           # journalctl -u reclockd -f
+reclockctl restart        # systemctl restart reclocked
+reclockctl reload         # SIGHUP — re-read /etc/reclocked.conf without restart
+reclockctl logs           # journalctl -u reclocked -f
 reclockctl fan-off        # freeze auto fan control (drive fans manually via sysfs)
 reclockctl fan-on         # resume auto fan control
 reclockctl switch-status  # v5.0 switchd: topology, dGPU power, target, nvram_prefs
@@ -823,7 +839,7 @@ sudo cat /sys/kernel/debug/dri/0000:01:00.0/pstate
 Adds a kernel-side auto-reclock policy to nouveau's `clk/base.c` and
 `include/nvkm/subdev/clk.h`: a `nvkm_alarm` sampling timer, EMA of busy time, and
 up/down threshold counters, so nouveau can reclock on its own without a
-userspace daemon. This is the upstream-able version of what `reclockd` does in
+userspace daemon. This is the upstream-able version of what `reclocked` does in
 userspace. Apply to a Linux kernel source tree:
 
 ```sh
@@ -854,7 +870,7 @@ A udev rule that force-loads the `nouveau` module for the GT 750M (GK107, PCI
 `/usr/lib/modprobe.d/nvidia-utils.conf` with `blacklist nouveau`, even when the
 proprietary `nvidia` kernel module is **not** installed. The blacklist suppresses
 auto-loading via the PCI alias, so the dGPU comes up without a driver,
-`/sys/kernel/debug/dri/*/pstate` is absent, and `reclockd` spins idle. A direct
+`/sys/kernel/debug/dri/*/pstate` is absent, and `reclocked` spins idle. A direct
 `modprobe nouveau` by name bypasses the blacklist (it only blocks alias
 auto-load), which is exactly what this udev rule triggers on device add. The rule
 survives `nvidia-utils` updates because it lives in `/etc` (overrides
@@ -910,7 +926,7 @@ only claimed as handled so the detector stays out of it.
 
 `0015` drops the `nand-disk` LED trigger from the keyboard backlight
 (`applesmc.c`). The `smc::kbd_backlight` LED was wired to the MTD activity
-trigger, so any SPI NOR flash read (NVRAM scan by reclockd, `nvram-test.sh`,
+trigger, so any SPI NOR flash read (NVRAM scan by reclocked, `nvram-test.sh`,
 `gmux-io`, udev/firmware) fired a oneshot blink that left the LED at 0 —
 the keyboard backlight physically turned off (SMC `LKSB=0`) and only came back
 when systemd-logind restored it on session activation. `default_trigger = NULL`
@@ -923,14 +939,14 @@ is a class-level fix: the kbd LED is back under plain brightness control.
 ### `pstate.sh`
 
 Inspect or force the GPU pstate through debugfs, integrated with the daemon's
-override flag-file. `set` creates `/run/reclockd/override` and freezes auto
+override flag-file. `set` creates `/run/reclocked/override` and freezes auto
 mode; `auto` clears it. Requires root for the debugfs write. v5.0 additions:
 when the dGPU is OFF (switchd), `status` falls back to the CPU `coretemp`
 temperature and also shows the iGPU RPS monitoring (read-only), and `set`
 refuses to write pstate — a pstate write on a power-cut card hangs nouveau.
 v5.1 addition: `status` also prints an `=== wentylatory ===` section — the
 active fan curve (`igd | dga | compiler | override | off`), its temperature
-range and the current RPMs, read from `/run/reclockd/status` (applesmc sysfs
+range and the current RPMs, read from `/run/reclocked/status` (applesmc sysfs
 fallback when the daemon is down).
 
 ### `build-mesa.sh`
@@ -1012,7 +1028,7 @@ sudo ./bench-gpu.sh -g both -m offscreen -p all
 
 ## ⚙️ How it works
 
-Every `interval-ms` (default 200 ms), `reclockd`:
+Every `interval-ms` (default 200 ms), `reclocked`:
 
 1. Samples GPU busy% from the BAR0 PMU idle counters (`R_IDLE_COUNT` for busy
    and total, reset after read) — a 0-1000 per-mille figure independent of any
@@ -1040,7 +1056,7 @@ Every `interval-ms` (default 200 ms), `reclockd`:
 The DRM FD to `card0` is opened once at startup for vblank sync. Immediately
 after `open()`, the daemon calls `DRM_IOCTL_DROP_MASTER` so it never holds DRM
 master and never blocks the compositor. See
-[The DRM master problem](#the-drm-master-problem-and-why-reclockd-drops-it).
+[The DRM master problem](#the-drm-master-problem-and-why-reclocked-drops-it).
 
 All settings are **runtime-only**: a reboot resets the GPU to boot clocks and
 the daemon re-applies policy on next start. On `SIGTERM`, the daemon writes
@@ -1052,10 +1068,10 @@ restores SMC fan auto (`fanN_manual=0`).
 ## 🛡 Safety / Risks
 
 - ⚠️ **Max pstate `0f` lockups**: NVE0-class Kepler parts are known to lock up
-  under undervolt at the max pstate. `0f` is off-ladder in `reclockd` and only
+  under undervolt at the max pstate. `0f` is off-ladder in `reclocked` and only
   entered under sustained load + cool temp; thermal guard drops it instantly.
   If you do not want `0f` at all, leave `boost-pstate` unset in
-  `reclockd.conf` (or set it to a value ≤ `max-pstate`, which disables boost).
+  `reclocked.conf` (or set it to a value ≤ `max-pstate`, which disables boost).
 - 🎛 **Aggressive memory reclock**: `0e` and `0f` reclock memory aggressively. Test
   carefully on your specific card. The safe ladder (`07 / 0a / 0e`) avoids the
   worst case by default.
@@ -1064,9 +1080,9 @@ restores SMC fan auto (`fanN_manual=0`).
   UP) — but you lose thermal protection, so monitor temp manually.
 - 🆘 **`recover-gpu.sh`** is provided for the case where a GPU experiment breaks
   the display. Run it from SSH or a TTY.
-- 🔐 **Root daemon**: `reclockd` requires root (mmap BAR0 + write debugfs). Audit
+- 🔐 **Root daemon**: `reclocked` requires root (mmap BAR0 + write debugfs). Audit
   the source before running it. It is a single C++17 translation unit; the whole
-  policy is in `reclockd.cpp`.
+  policy is in `reclocked.cpp`.
 
 ---
 

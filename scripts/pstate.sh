@@ -3,7 +3,7 @@
 # Zapis przez debugfs: /sys/kernel/debug/dri/0000:01:00.0/pstate (wymaga root).
 # USTAWIENIA SĄ RUNTIME-ONLY: reboot ZAWSZE resetuje do stanu startowego.
 #
-# v4: integracja z reclockd — `set` włącza manual override (daemon zamraża auto),
+# v4: integracja z reclocked — `set` włącza manual override (daemon zamraża auto),
 #     `auto` zdejmuje override, `status` pokazuje też stan daemona i override.
 #
 # Użycie:
@@ -20,8 +20,8 @@
 
 PSTATE=/sys/kernel/debug/dri/0000:01:00.0/pstate
 VALID="07 0a 0e 0f"
-OVERRIDE_DIR=/run/reclockd
-OVERRIDE_FILE=/run/reclockd/override
+OVERRIDE_DIR=/run/reclocked
+OVERRIDE_FILE=/run/reclocked/override
 
 find_hwmon() {
   for h in /sys/class/hwmon/hwmon*; do
@@ -63,9 +63,9 @@ EOF
 }
 
 daemon_pid() {
-  # Zwraca PID reclockd lub pusty ciąg (testować niepustość, NIE exit status
+  # Zwraca PID reclocked lub pusty ciąg (testować niepustość, NIE exit status
   # potoku — `pgrep | head` ma status z `head`, zawsze 0; patrz raport 15).
-  pgrep -x reclockd 2>/dev/null | head -1
+  pgrep -x reclocked 2>/dev/null | head -1
 }
 
 daemon_status() {
@@ -184,17 +184,17 @@ igpu_status() {
 }
 
 fan_status() {
-  # v5.1: aktualna krzywa fan + obroty z daemona (/run/reclockd/status, JSON).
+  # v5.1: aktualna krzywa fan + obroty z daemona (/run/reclocked/status, JSON).
   # Krzywa wybiera daemon (igd/dga/compiler/override) — tu tylko odczyt.
   # Fallback bez daemona: obroty z sysfs applesmc (krzywa nieznana).
   local curve tmin tmax r1 r2 note
   echo "=== wentylatory ==="
-  if [ -r /run/reclockd/status ]; then
-    curve=$(sed -n 's/.*"fan_curve": *"\([^"]*\)".*/\1/p' /run/reclockd/status)
-    tmin=$(sed -n 's/.*"fan_tmin": *\([0-9]*\).*/\1/p' /run/reclockd/status)
-    tmax=$(sed -n 's/.*"fan_tmax": *\([0-9]*\).*/\1/p' /run/reclockd/status)
-    r1=$(sed -n 's/.*"fan_rpm1": *\([0-9]*\).*/\1/p' /run/reclockd/status)
-    r2=$(sed -n 's/.*"fan_rpm2": *\([0-9]*\).*/\1/p' /run/reclockd/status)
+  if [ -r /run/reclocked/status ]; then
+    curve=$(sed -n 's/.*"fan_curve": *"\([^"]*\)".*/\1/p' /run/reclocked/status)
+    tmin=$(sed -n 's/.*"fan_tmin": *\([0-9]*\).*/\1/p' /run/reclocked/status)
+    tmax=$(sed -n 's/.*"fan_tmax": *\([0-9]*\).*/\1/p' /run/reclocked/status)
+    r1=$(sed -n 's/.*"fan_rpm1": *\([0-9]*\).*/\1/p' /run/reclocked/status)
+    r2=$(sed -n 's/.*"fan_rpm2": *\([0-9]*\).*/\1/p' /run/reclocked/status)
     case "$curve" in
       igd)      note="tylko-iGPU (dGPU OFF)" ;;
       dga)      note="dGPU ON" ;;
@@ -225,7 +225,7 @@ status() {
         "$(awk '{printf "%.1f", $1/1000}' <<<"$t")" "$(basename "$hw")"
     elif ct=$(find_coretemp); then
       # dGPU OFF → pokaż temp CPU (coretemp) — to samo źródło, którego używa
-      # reclockd dla wentylatorów gdy dGPU OFF (max(dGPU,coretemp)).
+      # reclocked dla wentylatorów gdy dGPU OFF (max(dGPU,coretemp)).
       printf "=== temperatura: %.1f °C (dGPU OFF — CPU coretemp: %s) ===\n" \
         "$(awk '{printf "%.1f", $1/1000}' "$ct/temp1_input")" "$(basename "$ct")"
     else
@@ -234,7 +234,7 @@ status() {
   fi
   igpu_status
   fan_status
-  echo "=== reclockd ==="
+  echo "=== reclocked ==="
   daemon_status
   override_status
 }
@@ -259,7 +259,7 @@ set_state() {
   sudo -n test -f "$PSTATE" || { echo "BŁĄD: brak $PSTATE — czy debugfs zamontowany? (sprawdź: sudo cat $PSTATE)" >&2; return 1; }
   # switchd v5.0: dGPU OFF (gmux odciął zasilanie) → write pstate = hang w nouveau
   # (nvkm_pstate_calc — daemon zawisł tak w G1 live). Nie pozwól na to.
-  if [ -f /run/reclockd/status ] && grep -q '"dgpu_power": "off"' /run/reclockd/status; then
+  if [ -f /run/reclocked/status ] && grep -q '"dgpu_power": "off"' /run/reclocked/status; then
     echo "BŁĄD: dGPU jest WYŁĄCZONY (switchd v5.0) — zapis pstate by zawiesił kartę." >&2
     echo "      Najpierw włącz dGPU: reclockctl dgpu-on (potem reclockctl dgpu-auto)" >&2
     return 1
@@ -270,9 +270,9 @@ set_state() {
   printf '%s' "$arg" | sudo tee "$PSTATE" >/dev/null || return 1
   # Włącz manual override — daemon zamrozi auto dopóki flag-file istnieje.
   set_override "$arg"
-  echo "override włączony (/run/reclockd/override) — daemon zamraża auto"
-  if pgrep -x reclockd >/dev/null 2>&1; then
-    echo "daemon reclockd działa → hold na $val (auto wznowione po: ./pstate.sh auto)"
+  echo "override włączony (/run/reclocked/override) — daemon zamraża auto"
+  if pgrep -x reclocked >/dev/null 2>&1; then
+    echo "daemon reclocked działa → hold na $val (auto wznowione po: ./pstate.sh auto)"
   fi
   sleep 1
   echo "=== po zmianie ==="

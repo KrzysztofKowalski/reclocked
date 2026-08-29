@@ -1,5 +1,5 @@
 # Build artifacts
-reclockd/reclockd
+src/reclocked
 *.o
 build/
 *.log

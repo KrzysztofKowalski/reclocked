@@ -1,14 +1,14 @@
-# reclockd v5.0 — auto-reclocking GT 750M pod nouveau (systemd unit, NIE zainstalowany)
+# reclocked v5.0 — auto-reclocking GT 750M pod nouveau (systemd unit, NIE zainstalowany)
 # Instalacja (po decyzji usera):
-#   sudo cp reclockd.service /etc/systemd/system/
+#   sudo cp reclocked.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
-#   sudo systemctl enable --now reclockd
-# Usunięcie: sudo systemctl disable --now reclockd && sudo rm /etc/systemd/system/reclockd.service
+#   sudo systemctl enable --now reclocked
+# Usunięcie: sudo systemctl disable --now reclocked && sudo rm /etc/systemd/system/reclocked.service
 #
 # Daemon auto-wykrywa sesję Hyprlanda (skan /run/user/*/hypr/*/hyprland.lock)
 # i ustawia XDG_RUNTIME_DIR + HYPRLAND_INSTANCE_SIGNATURE żeby hyprctl (root)
 # połączył się z socketem usera. Brak Hyprlanda → fallback do profilu default.
-# Config: /etc/reclockd.conf (patrz --config flag). Override: /run/reclockd/override.
+# Config: /etc/reclocked.conf (patrz --config flag). Override: /run/reclocked/override.
 
 [Unit]
 Description=GPU auto-reclock daemon v5.0 (GT 750M / nouveau, app-aware + fan + switchd)
@@ -16,7 +16,7 @@ After=graphical.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/reclockd --config /etc/reclockd.conf --exit-state 0a
+ExecStart=/usr/local/bin/reclocked --config /etc/reclocked.conf --exit-state 0a
 Restart=on-failure
 RestartSec=5
 # Syslog → journald (stdout/stderr automatycznie przechwycone).

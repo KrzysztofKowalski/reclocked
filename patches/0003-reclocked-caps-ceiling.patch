@@ -1,7 +1,7 @@
-diff --git a/reclockd/reclockd.cpp b/reclockd/reclockd.cpp
+diff --git a/src/reclocked.cpp b/src/reclocked.cpp
 index 7163b56..955d778 100644
---- a/reclockd/reclockd.cpp
-+++ b/reclockd/reclockd.cpp
+--- a/src/reclocked.cpp
++++ b/src/reclocked.cpp
 @@ -93,6 +93,16 @@
  //      termiczna > priorytet tytułu). CEILING DOWN pozostaje (low-power terminal
  //      z focusem > title-match — patrz low-power gate). UP-TITLE NIE jest gate'owane

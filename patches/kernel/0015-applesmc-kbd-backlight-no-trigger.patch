@@ -7,7 +7,7 @@ Kbd LED (smc::kbd_backlight) ma default_trigger = "nand-disk", czyli jest
 podpięty pod trigger ledtrig_nand/mtd. Każdy odczyt SPI NOR flasha
 (ledtrig_mtd_activity, mtdcore.c) odpala na nim oneshot blink, który zostawia
 LED na 0 (LED_BLINK_ONESHOT_STOP) → applesmc_brightness_set(0) → SMC LKSB=0 →
-fizyczne podświetlenie klawiatury gaśnie. Dotknięte: reclockd (odczyt
+fizyczne podświetlenie klawiatury gaśnie. Dotknięte: reclocked (odczyt
 gpu-power-prefs z /dev/mtd0ro), nvram-test.sh, gmux-io.c, udev/firmware —
 jakikolwiek odczyt MTD.
 

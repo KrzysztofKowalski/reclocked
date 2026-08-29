@@ -1,4 +1,4 @@
-// reclockd v4 — auto-reclocking GT 750M (GK107, Kepler) pod nouveau.
+// reclocked v4 — auto-reclocking GT 750M (GK107, Kepler) pod nouveau.
 //
 // Buduje na v3 (polityka temperaturowo-obciążeniowa, dwell-countery, hwmon temp,
 // mmap BAR0 PMU idle counters, vblank sync). NOWOŚCI v4:
@@ -6,9 +6,9 @@
 //   1. PROFILE app-aware: `default` (cap 07, throttle) vs `preferred` (cap 0e
 //      z eskalacją do 0f przy sustained high busy). Profil wybierany dynamicznie
 //      na podstawie aktywnej apki z Hyprlanda (hyprctl activewindow + clients).
-//   2. CONFIG /etc/reclockd.conf: lista [preferred] class-ów + progi per profil.
+//   2. CONFIG /etc/reclocked.conf: lista [preferred] class-ów + progi per profil.
 //      Własny parser INI-line, bez zewnętrznych deps.
-//   3. MANUAL OVERRIDE: flag-file `/run/reclockd/override` — daemon zamraża auto
+//   3. MANUAL OVERRIDE: flag-file `/run/reclocked/override` — daemon zamraża auto
 //      gdy istnieje. `pstate.sh set` tworzy flag-file, `pstate.sh auto` usuwa.
 //   4. KONTROLA DAEMONA: SIGHUP → re-read configu bez restartu. systemd unit
 //      + wrapper `reclockctl`.
@@ -75,7 +75,7 @@
 //      max na wentylator). x = clamp((temp - temp_min) / (temp_max - temp_min), 0,1);
 //      rpm = fanN_min + round(x * (fanN_max - fanN_min)). Aktualizacja co poll_ms
 //      (1 s). Sekcja [fan]: enable/temp-min(51)/temp-max(91).
-//   G. FAN OVERRIDE: flag-file `/run/reclockd/fan-override` zamraża auto wentyl.
+//   G. FAN OVERRIDE: flag-file `/run/reclocked/fan-override` zamraża auto wentyl.
 //      (użytkownik steruje ręcznie: cusfan.sh / fullfan.sh). reclockctl fan-off/on.
 //   H. FAIL-SAFE wentylatorów: restore_auto() przy wyjściu zdejmuje fanN_manual=0
 //      → SMC przejmuje auto (nigdy nie zostawiaj wentyl. zablokowanych na manualu).
@@ -124,7 +124,7 @@
 //      (names = dodatkowe nazwy przecinkami). Fan.set_boost(pct) pisze
 //      manual=1 + output dla obu wentylatorów (liniowa interpolacja między
 //      fanN_min a fanN_max). Boost działa TYLKO w auto-mode — fan-override
-//      flag-file (/run/reclockd/fan-override) ma priorytet (nie nadpisuje
+//      flag-file (/run/reclocked/fan-override) ma priorytet (nie nadpisuje
 //      ręcznego sterowania). Gdy kompilator zniknie → powrót do krzywej temp
 //      (normalna ścieżka). Detekcja co poll_cycles (1 s), próg — zatrzymaj
 //      scan gdy znaleziono.
@@ -133,11 +133,11 @@
 //   M. SWITCHD — moduł dGPU power-state + render routing (Etap 1: monitor w DIS).
 //      Topologia (vgaswitcheroo DIS/IGD), power dGPU (manual/runpm), polityka
 //      (twarda/miękka promocja, demote, min-residence, cooldown, gate termiczny),
-//      wykonawca (power-on/off gated topologią), status /run/reclockd/status +
+//      wykonawca (power-on/off gated topologią), status /run/reclocked/status +
 //      /run/switchd/dgpu, NVRAM read gpu-power-prefs (efivarfs → raw flash),
 //      igpu_freq_mhz read-only. W DIS = monitor (zero zmian power). Sekcje
 //      [switch]/[dpower]/[dgpu-hard]/[dgpu-soft]/[igpu]/[dgpu-procs].
-//   N. DGPU OVERRIDE: flag-file /run/reclockd/dgpu-override (on|off) — wzorzec
+//   N. DGPU OVERRIDE: flag-file /run/reclocked/dgpu-override (on|off) — wzorzec
 //      fan-override (G). reclockctl dgpu-on/dgpu-off/dgpu-auto. Daemon w tick()
 //      wymusza target PRZED polityką (decide pominięty). Override "off" nadal
 //      przechodzi przez bramki apply(): wait_idle (tylko węzły dGPU — lekcja
@@ -152,7 +152,7 @@
 //      sw.dgpu_off() (stan power dGPU), niezależny od topologii.
 //
 // v5.3 (2026-08-28):
-//   P. NVRAM CACHE: cache gpu-power-prefs do /run/reclockd/nvram-prefs. Skan
+//   P. NVRAM CACHE: cache gpu-power-prefs do /run/reclocked/nvram-prefs. Skan
 //      raw flash (/dev/mtd0ro) przy każdym starcie gasi kbd backlight (odczyt
 //      MTD → ledtrig_mtd_activity → trigger "nand-disk" na smc::kbd_backlight
 //      → oneshot blink → LKSB=0; raport 80). /run to tmpfs — cache resetuje
@@ -221,10 +221,41 @@
 //       fan-override NADRZĘDNE — pomijają ramp, safety). Sekcja [fan-case]:
 //       enable/keys/case-min/case-max/case-dwell-ms/hold-ms/exit-dwell-ms/
 //       margin/hold-floor/ramp-rpm-s. Status: fan_case_avg (°C, -1 = brak
-//       ważnych odczytów) + fan_case_state (normal|soak) w /run/reclockd/status
+//       ważnych odczytów) + fan_case_state (normal|soak) w /run/reclocked/status
 //       i reclockctl. Klawiatura = proxy TC0E/TC0F (rama pod klawiaturą) —
 //       POZA zestawem B (duplikat krzywej CPU, raport 97 §2.3). enable=false
 //       (default) → stary algorytm wentylatorów 1:1 (escape hatch).
+//
+// v5.12 (2026-08-29, raport 98 — case-min 20°C decyzja usera + fix wyjścia SOAK):
+//   Diagnoza: SOAK NIGDY nie wychodził (case-min−margin = 27/37/17°C — poniżej
+//   fizycznego minimum obudowy ~40°C przy pracy; zero logów "NORMAL" w historii)
+//   + przy case-min=40 floor SOAK = krzywa(44°C) = 28% — za słaby na chłodzenie
+//   (case stoi 44.2°C, wiatraki 3284 RPM). Zmiany: (1) case-min 40→20 —
+//   krzywa mocna w strefie pracy: (44−20)/(55−20) = 68% → fan1 ≈ 4877 RPM,
+//   case aktywnie schładzany do fizycznego minimum; (2) wejście SOAK przez
+//   NOWY klucz soak-enter (default 45°C — powyżej strefy pracy 40-44°C, NIE
+//   case-min: przy case-min 20 "case > case-min" jest zawsze prawdą); (3)
+//   wyjście SOAK CZYSTO CZASOWE — po hold-ms (default 300000 = 5 min, pulsa)
+//   bezwarunkowo NORMAL (dekadencja czasowa; jedyne gwarantowane wyjście);
+//   re-entry gdy case znów > soak-enter (duty cycle przy ciągłym upale,
+//   odpoczynek po schłodzeniu); (4) floor SOAK = max(krzywa wejścia,
+//   krzywa(aktualny)) — escalacja v5.11 BEZ ZMIAN (decyzja usera);
+//   (5) margin/exit-dwell-ms OBSOLETE — parsowane dla back-compat, nieużywane.
+//
+// v5.13 (2026-08-29, raporty 99/100):
+//   Y. GATE POWER-OFF ŚWIADOMY AKTYWNOŚCI (D1): render fd dGPU otwarty NIE
+//      blokuje już power-offu sam w sobie — chromium trzyma pasywny probe fd
+//      na renderD129 NA STAŁE (fdinfo puste, busy=0, gpu-process na iGPU;
+//      lekcja raportu 99: po KAŻDEJ promocji YT power-off wisiał na fd chroma
+//      na czas życia procesu, retry-loop co ~6 s, dGPU ON bezczynnie).
+//      Deferuj TYLKO gdy render fd otwarty ORAZ dGPU wykazuje aktywność:
+//      busy > 1‰ przez okno busy-idle-dwell-ms ([switch], default 3000).
+//      Guard g_pmu_config_valid — po utracie konfiguracji liczników busy PMU
+//      (post-resume, v4.5 readback R_IDLE_CTRL) busy czyta 0 mimo aktywności
+//      → bezpiecznie defer. Audio dGPU (aktywny PCM playback) blokuje NADAL
+//      TWARDO (audio nie rusza liczników GR/CE2 — busy mógłby czytać 0 przy
+//      odtwarzaniu). Dwell mierzony od ostatniej próbki busy>0 (reset przy
+//      power-on) — chroni przed race: klient startuje render zaraz po OFF.
 
 // v5.8 (2026-08-28):
 //   W. TESTY POZA BOOSTEM KOMPILATORA: procesy testowe — cmake -P LaunchTest.cmake
@@ -284,18 +315,18 @@ static const char* PSTATE_FILE  = "/sys/kernel/debug/dri/0000:01:00.0/pstate";
 static const char* POWER_CTRL   = "/sys/bus/pci/devices/0000:01:00.0/power/control";
 static const char* HWMON_DIR    = "/sys/class/hwmon";
 static const char* DRM_CARD     = "/dev/dri/card0"; // dGPU (nouveau) — eDP scanout
-static const char* OVERRIDE_FILE = "/run/reclockd/override";
-static const char* FAN_OVERRIDE_FILE = "/run/reclockd/fan-override";
-static const char* DEFAULT_CONFIG = "/etc/reclockd.conf";
+static const char* OVERRIDE_FILE = "/run/reclocked/override";
+static const char* FAN_OVERRIDE_FILE = "/run/reclocked/fan-override";
+static const char* DEFAULT_CONFIG = "/etc/reclocked.conf";
 
 // v5.0: switchd — ścieżki power/topologia/status.
 static const char* VGA_SWITCHEROO = "/sys/kernel/debug/vgaswitcheroo/switch";
 static const char* RUNTIME_STATUS = "/sys/bus/pci/devices/0000:01:00.0/power/runtime_status";
 static const char* AUTOSUSPEND_DELAY = "/sys/bus/pci/devices/0000:01:00.0/power/autosuspend_delay_ms";
 static const char* IGPU_RPS_CUR = "/sys/class/drm/card1/gt/gt0/rps_cur_freq_mhz";
-static const char* SWITCH_STATUS_FILE = "/run/reclockd/status";
+static const char* SWITCH_STATUS_FILE = "/run/reclocked/status";
 static const char* SWITCH_DGPU_FILE = "/run/switchd/dgpu";
-static const char* DGPU_OVERRIDE_FILE = "/run/reclockd/dgpu-override";
+static const char* DGPU_OVERRIDE_FILE = "/run/reclocked/dgpu-override";
 
 // v5.0: BDF dGPU (GK107) i jego audio (HDA DIS-A 0000:01:00.1). Węzły DRM i
 // sound rozwiązywane przez BDF (DGPU_PCI / DGPU_AUDIO_PCI) — numeracja cardN/
@@ -435,15 +466,25 @@ struct Config {
     // krzywa case (średnia applesmc) + SOAK/HOLD (trzymanie podbitych obrotów
     // przez czas) + RAMP (limit zmian RPM na 1 s). enable=false (default) →
     // stary algorytm wentylatorów 1:1 (escape hatch).
+    // v5.12: case-min=20 (decyzja usera — fizyczne minimum przy pracy ~40°C
+    // leży WEWNĄTRZ zakresu krzywej → krzywa mocna w strefie pracy: 44°C→68%).
+    // Wyjście SOAK CZYSTO CZASOWE (po hold-ms, bezwarunkowe) — wyjście
+    // temperaturowe (case < case-min−margin) było fizycznie nieosiągalne
+    // (17/27/37°C) → SOAK wisiał wiecznie (zero wyjść w historii 23:46-01:20).
+    // Wejście SOAK przez soak-enter (default 45°C — powyżej typowej strefy
+    // pracy 40-44°C); floor = max(krzywa wejścia, krzywa(aktualny)) (v5.11).
     struct FanCaseCfg {
         bool enable = false;
         std::vector<std::string> keys;  // klucze SMC (label) do średniej
-        int case_min = 40;              // °C: case ≤ → 0% zakresu RPM (nic nie wymusza)
+        int case_min = 20;              // °C: case ≤ → 0% zakresu RPM (nic nie wymusza)
         int case_max = 60;              // °C: case ≥ → 100% zakresu RPM
-        int dwell_in_ms = 5000;         // case > case-min przez tyle → SOAK
-        int hold_ms = 90000;            // górny limit trwania SOAK
-        int exit_dwell_ms = 10000;      // case < case-min−margin przez tyle → NORMAL
-        int margin = 3;                 // °C histerezy przy wyjściu z SOAK
+        int soak_enter = 45;            // °C: case > → SOAK (powyżej strefy pracy)
+        int dwell_in_ms = 5000;         // case > soak-enter przez tyle → SOAK
+        int hold_ms = 300000;           // v5.12: CZAS TRWANIA SOAK (pulsa) — po
+                                        // nim wyjście bezwarunkowe (dekadencja
+                                        // czasowa; 5 min = ~stała czasowa obudowy)
+        int exit_dwell_ms = 10000;      // v5.12: OBSOLETE — parsowane dla
+        int margin = 3;                 // back-compat, nieużywane (wyjście czasowe)
         int ramp_rpm_s = 150;           // max zmiana RPM na 1 s (0 = bez rampu)
     } fan_case;
     // v4.6: sekcja [compiler] — boost wentylatorów gdy wykryty kompilator
@@ -495,6 +536,15 @@ struct Config {
         // dGPU przejmuje render, CPU się chłodzi. 0 = wyłączony. Konfiguro-
         // walne w [switch] (cpu-temp-promote), reload przez SIGHUP.
         int  cpu_temp_promote = 70;
+        // v5.13 (D1, raport 99/100): gate power-off świadomy aktywności. Czas
+        // (ms) przez który busy dGPU musi być 0 przy otwartym render fd, zanim
+        // power-off przejdzie. Chromium trzyma pasywny probe fd na renderD129
+        // NA STAŁE (busy=0, fdinfo puste) — dwell odróżnia pasywnego holdera
+        // od aktywnego klienta renderu (busy>0 → defer). Resetowany przy
+        // power-on (świeży cykl = świeże okno). 0 = wyłączony (gate tylko na
+        // sam fd — stare zachowanie z raportu 98). Klucz [switch]
+        // busy-idle-dwell-ms, reload przez SIGHUP.
+        int  busy_idle_dwell_ms = 3000;
         // v5.6: tytuły Discord/YouTube (kopiowane z [preferred-titles] w parserze)
         // — promocja tytułowa karty w przeglądarce, NIE zapinka (idle-release).
         std::set<std::string> preferred_titles;
@@ -556,7 +606,7 @@ static const char* dgpu_state_name(int idx, const Config::DgpuActiveCfg& d)
     return "active";
 }
 
-// v5.1: stan fan dla statusu (/run/reclockd/status) — aktualna krzywa + obroty.
+// v5.1: stan fan dla statusu (/run/reclocked/status) — aktualna krzywa + obroty.
 // Wypełniane w fan block pętli głównej, czytane przez write_status() (pstate.sh,
 // pasek Omarchy). off|override|compiler|igd|dga; tmin/tmax = aktywny zakres.
 static std::string g_fan_curve = "off";
@@ -564,7 +614,7 @@ static int  g_fan_tmin = 51, g_fan_tmax = 91;
 // v5.9: punkt przegięcia krzywy 3-punktowej (0 = legacy liniowa) — status.
 static int  g_fan_tmid = 0, g_fan_pmid = 0;
 static int  g_fan_rpm1 = 0, g_fan_rpm2 = 0;
-// v5.10: [fan-case] — status (JSON /run/reclockd/status): średnia obudowy (°C,
+// v5.10: [fan-case] — status (JSON /run/reclocked/status): średnia obudowy (°C,
 // -1 = brak ważnych odczytów) + stan SOAK. Wypełniane w bloku fan, czytane przez
 // write_status() (pstate.sh, pasek Omarchy).
 static double g_fan_case_avg = -1.0;
@@ -599,7 +649,7 @@ static void on_hup(int)  { g_reload = 1; }
 
 static int write_file(const char* path, const std::string& data)
 {
-    // v5.0: O_CREAT|O_TRUNC — pliki statusu (/run/reclockd/status, /run/switchd/dgpu)
+    // v5.0: O_CREAT|O_TRUNC — pliki statusu (/run/reclocked/status, /run/switchd/dgpu)
     // nie istnieją przy pierwszym zapisie; bez O_CREAT open() zwraca ENOENT i zapis
     // cicho ginie. Dla sysfs (fan1_manual, fan1_output, pstate itd.) to no-op —
     // pliki zawsze istnieją, sysfs ignoruje O_TRUNC.
@@ -759,9 +809,11 @@ static bool load_config(const std::string& path, Config& cfg)
         }
         // v5.10: sekcja [fan-case] — termika obudowy (raport 97, wariant B).
         // Klucze: enable, keys (klucze SMC przecinkami), case-min, case-max,
-        // case-dwell-ms (alias dwell-in, w sekundach), hold-ms, exit-dwell-ms
-        // (alias exit-dwell, w sekundach), margin, hold-floor (curve — jedyna
-        // obsługiwana), ramp-rpm-s.
+        // soak-enter (v5.12 — próg wejścia SOAK), case-dwell-ms (alias
+        // dwell-in, w sekundach), hold-ms, exit-dwell-ms (alias exit-dwell,
+        // w sekundach), margin, hold-floor (curve — jedyna obsługiwana),
+        // ramp-rpm-s. v5.12: exit-dwell-ms/margin parsowane dla back-compat,
+        // NIEUŻYWANE (wyjście SOAK czasowe po hold-ms).
         if (section == "fan-case") {
             size_t eqh = t.find('=');
             if (eqh == std::string::npos) continue;
@@ -782,12 +834,13 @@ static bool load_config(const std::string& path, Config& cfg)
             }
             else if (keyh == "case-min")      cfg.fan_case.case_min = parse_int(valh);
             else if (keyh == "case-max")      cfg.fan_case.case_max = parse_int(valh);
+            else if (keyh == "soak-enter")    cfg.fan_case.soak_enter = parse_int(valh);
             else if (keyh == "case-dwell-ms") cfg.fan_case.dwell_in_ms = parse_int(valh);
             else if (keyh == "dwell-in")      cfg.fan_case.dwell_in_ms = parse_int(valh) * 1000; // sekundy
             else if (keyh == "hold-ms")       cfg.fan_case.hold_ms = parse_int(valh);
-            else if (keyh == "exit-dwell-ms") cfg.fan_case.exit_dwell_ms = parse_int(valh);
-            else if (keyh == "exit-dwell")    cfg.fan_case.exit_dwell_ms = parse_int(valh) * 1000; // sekundy
-            else if (keyh == "margin")        cfg.fan_case.margin = parse_int(valh);
+            else if (keyh == "exit-dwell-ms") cfg.fan_case.exit_dwell_ms = parse_int(valh); // v5.12: nieużywane (back-compat)
+            else if (keyh == "exit-dwell")    cfg.fan_case.exit_dwell_ms = parse_int(valh) * 1000; // jw.
+            else if (keyh == "margin")        cfg.fan_case.margin = parse_int(valh);      // v5.12: nieużywane (back-compat)
             else if (keyh == "hold-floor") {
                 // curve — jedyna obsługiwana wartość (floor = krzywa przy case
                 // wejścia w SOAK); inne wartości ignorowane.
@@ -846,6 +899,9 @@ static bool load_config(const std::string& path, Config& cfg)
             // v5.9: cpu-temp-promote — próg temp CPU (°C) dla kart tytułowych
             // (YT/Discord): CPU ≥ próg → re-promocja + blokada demote (0 = off).
             else if (keys == "cpu-temp-promote") cfg.sw.cpu_temp_promote  = parse_int(vals);
+            // v5.13 (D1): busy-idle-dwell-ms — dwell busy=0 dla gate power-off
+            // (render fd pasywny nie blokuje; aktywny render busy>0 → defer).
+            else if (keys == "busy-idle-dwell-ms") cfg.sw.busy_idle_dwell_ms = parse_int(vals);
             continue;
         }
         // v5.0: sekcja [dpower] — backend power dGPU.
@@ -967,13 +1023,19 @@ static bool load_config(const std::string& path, Config& cfg)
              cfg.fan_case.case_max, cfg.fan_case.case_min);
         cfg.fan_case.enable = false;
     }
+    // v5.12: soak-enter musi leżeć WEWNĄTRZ zakresu krzywej (powyżej case-min —
+    // inaczej SOAK wchodzi zawsze; poniżej case-max) — inaczej korekta.
+    if (cfg.fan_case.soak_enter <= cfg.fan_case.case_min)
+        cfg.fan_case.soak_enter = cfg.fan_case.case_min + 10;
+    if (cfg.fan_case.soak_enter >= cfg.fan_case.case_max)
+        cfg.fan_case.soak_enter = cfg.fan_case.case_max - 1;
     if (cfg.fan_case.margin < 1) cfg.fan_case.margin = 1;
     if (cfg.fan_case.dwell_in_ms < 0) cfg.fan_case.dwell_in_ms = 0;
     if (cfg.fan_case.exit_dwell_ms < 0) cfg.fan_case.exit_dwell_ms = 0;
     if (cfg.fan_case.hold_ms < 1000) {
-        logf(0, "config: [fan-case] hold-ms < 1000 (%d) — koryguję na 90000",
+        logf(0, "config: [fan-case] hold-ms < 1000 (%d) — koryguję na 300000",
              cfg.fan_case.hold_ms);
-        cfg.fan_case.hold_ms = 90000;
+        cfg.fan_case.hold_ms = 300000;
     }
     if (cfg.fan_case.ramp_rpm_s < 0) cfg.fan_case.ramp_rpm_s = 0;
     // v4.6: sanity compiler — fan-max clamp do [0,100] (100 = pełne wiatraki).
@@ -1230,7 +1292,7 @@ private:
 //
 // Fail-safe: init() zwraca false gdy brak plików applesmc → fan wyłączony bez
 // błędu (demon działa bez sterowania wentylatorami). restore_auto() przy wyjściu
-// zdejmuje manual (fanN_manual=0) → SMC przejmuje auto-kontrolę (reclockd nigdy
+// zdejmuje manual (fanN_manual=0) → SMC przejmuje auto-kontrolę (reclocked nigdy
 // nie zostawia wentylatorów zablokowanych na manualu po zatrzymaniu).
 
 class Fan {
@@ -1628,6 +1690,13 @@ static std::string current_state()
 static volatile int g_cur_idx = -1;
 // v5.0: ostatnia próbka busy (‰) — współdzielona między pętlą główną a switchd tick.
 static volatile uint32_t g_last_busy = 0;
+// v5.13 (D1, raport 99/100): ważność konfiguracji liczników busy PMU (BAR0,
+// readback R_IDLE_CTRL co cykl — v4.5 self-heal). Gdy config stracony
+// (post-resume) liczniki nie zliczają → busy czyta 0 mimo aktywności —
+// gate power-off (D1) przy niepewnym liczniku bezpiecznie deferuje.
+// false tylko w cyklach, gdzie readback ≠ CTRL_VALUE_ALWAYS (do końca
+// recovery); po recovery readback wraca do ALWAYS → true.
+static volatile bool g_pmu_config_valid = true;
 
 // ----------------------------------------------------------- sliding window
 
@@ -1696,10 +1765,10 @@ static bool drm_open()
     }
     logf(1, "drm: vblank sync na %s", dev.c_str());
     // Zrzuć KMS master natychmiast po open(). Pierwszy opener danej karty zostaje
-    // domyślnym DRM masterem; bez tego reclockd blokuje Hyprlandowi przejęcie
+    // domyślnym DRM masterem; bez tego reclocked blokuje Hyprlandowi przejęcie
     // karty przez libseat/logind (EBUSY -> "Found no gpus" -> crash -> black
     // screen). Vblank (_DRM_VBLANK_RELATIVE) działa bez mastera — dowód:
-    // reclockd współistniał z Hyprlandem gdy fbcon był masterem. Błąd DROP_MASTER
+    // reclocked współistniał z Hyprlandem gdy fbcon był masterem. Błąd DROP_MASTER
     // (EINVAL/ENODEV) gdy nie jesteśmy masterem jest oczekiwany i ignorowany.
     if (ioctl(g_drm_fd, DRM_IOCTL_DROP_MASTER, 0) < 0 && errno != EINVAL && errno != ENODEV)
         logf(0, "drm: DROP_MASTER błąd (%s)", std::strerror(errno));
@@ -1947,6 +2016,16 @@ private:
 // gate "każde /dev/dri/*" byłby wiecznie busy i power-off nigdy by nie przeszedł
 // (lekcja z live-testu G1: apply() → "dGPU zajęty (otwarte fd /dev/dri) —
 // power-off odroczony"). Dlatego fd_busy() blokuje TYLKO węzły dGPU.
+// LEKCJA 2026-08-29 (stuck power-off po rmmod/modprobe): card<N> dGPU bywa też
+// otwarty PASYWNIE przez managerów seat/modeset (systemd, systemd-logind,
+// Hyprland — nigdy nie zamykają). W IGD nikt nie modesetuje na dGPU → card fd
+// na dGPU = ZAWSZE pasywne, nie może blokować power-offu. Blokują tylko
+// renderD<N> dGPU (rzeczywiste renderowanie) + aktywny PCM playback (audio).
+// LEKCJA 2026-08-29 v2 (D1, raport 99/100): nawet renderD<N> bywa PASYWNY —
+// chromium trzyma probe fd na renderD129 NA STAŁE (fdinfo puste, busy=0).
+// Gate v2 (gate_check): render fd blokuje TYLKO z aktywnością dGPU (busy > 1%
+// w oknie busy-idle-dwell-ms); pasywny fd (busy=0 przez dwell) nie blokuje.
+// Audio dGPU (aktywny PCM playback) blokuje NADAL TWARDO.
 
 // readlink + basename celu (np. /sys/class/drm/card0/device → "0000:01:00.0").
 // Bez libgen.h — własny basename, bez mutowania bufora.
@@ -1961,8 +2040,13 @@ static std::string readlink_basename(const std::string& path)
     return slash == std::string::npos ? target : target.substr(slash + 1);
 }
 
-// Węzły DRM dGPU: /dev/dri/card<N> + /dev/dri/renderD<N> dla PCI == DGPU_PCI.
-static std::set<std::string> dgpu_drm_nodes()
+// Węzły RENDER dGPU: /dev/dri/renderD<N> dla PCI == DGPU_PCI. Świadomie BEZ
+// card<N> — systemd/logind/Hyprland otwierają card dGPU PASYWNIE (managerzy
+// seat/modeset) i nigdy nie zamykają; w IGD nikt nie modesetuje na dGPU, więc
+// card fd na dGPU = zawsze pasywne (lekcja 2026-08-29: po rmmod/modprobe card0
+// stał się dGPU i te fds zablokowały power-off NA STAŁE). renderD<N> to jedyny
+// AKTYWNY węzeł DRM dGPU (render-offload) — tylko on może blokować power-off.
+static std::set<std::string> dgpu_render_nodes()
 {
     std::set<std::string> nodes;
     DIR* d = opendir("/sys/class/drm");
@@ -1970,17 +2054,17 @@ static std::set<std::string> dgpu_drm_nodes()
     struct dirent* e;
     while ((e = readdir(d))) {
         std::string name = e->d_name;
-        // Tylko węzły card<N> / renderD<N> — konektory (cardN-DP-1) mają
-        // device → cardN, nie pasują do DGPU_PCI (filtr i tak je odsiewa).
+        // Tylko węzły renderD<N> — card<N> pomijany celowo (pasywne fds
+        // seat/modeset managerów); konektory (cardN-DP-1) i tak mają
+        // device → cardN, nie pasują do DGPU_PCI.
         auto is_digits = [&](size_t off) {
             if (name.size() <= off) return false;
             for (size_t i = off; i < name.size(); i++)
                 if (!std::isdigit((unsigned char)name[i])) return false;
             return true;
         };
-        bool is_card = name.rfind("card", 0) == 0 && is_digits(4);
         bool is_rend = name.rfind("renderD", 0) == 0 && is_digits(7);
-        if (!is_card && !is_rend) continue;
+        if (!is_rend) continue;
         if (readlink_basename("/sys/class/drm/" + name + "/device") == DGPU_PCI)
             nodes.insert("/dev/dri/" + name);
     }
@@ -2020,7 +2104,7 @@ static std::string dgpu_snd_playback_card()
     return card;
 }
 
-// v5.0: dgpu-override flag-file (/run/reclockd/dgpu-override). reclockctl
+// v5.0: dgpu-override flag-file (/run/reclocked/dgpu-override). reclockctl
 // dgpu-on/dgpu-off/dgpu-auto. Wzorzec fan-override (G): "" = brak pliku (auto),
 // "on" = dGPU wymuszony ON, "off" = dGPU wymuszony OFF.
 static std::string dgpu_override()
@@ -2051,7 +2135,8 @@ public:
     };
 
     DgpuPower(const std::string& backend, int autosuspend_ms)
-        : backend_(backend), autosuspend_ms_(autosuspend_ms) {}
+        : backend_(backend), autosuspend_ms_(autosuspend_ms),
+          last_busy_nonzero_(std::chrono::steady_clock::now()) {}
 
     void set_recover_cb(std::function<bool()> cb) { recover_cb_ = std::move(cb); }
 
@@ -2091,6 +2176,12 @@ public:
 
     bool set_on()
     {
+        // v5.13 (D1): świeży power-cycle = świeże okno idle dla gate power-off
+        // (busy=0 po power-onie nie „dziedziczy" starego timera — inaczej dwell
+        // busy-idle-dwell-ms przepuszczałby OFF natychmiast po power-onie, zanim
+        // klient zdąży zacząć render; lekcja raportu 99: po power-onie do
+        // pierwszej próby OFF mija mniej niż dwell).
+        last_busy_nonzero_ = std::chrono::steady_clock::now();
         if (backend_ == "runpm") {
             write_file(AUTOSUSPEND_DELAY, std::to_string(autosuspend_ms_));
             return write_file(POWER_CTRL, "on") == 0;
@@ -2118,24 +2209,21 @@ public:
         return recover_cb_();
     }
 
-    // Skan /proc/*/fd za otwarte fd na węzłach dGPU (DRM exact + PCM playback
-    // audio dGPU). WAŻNE: TYLKO węzły dGPU (rozwiązane przez BDF). W IGD
-    // kompozytor (Hyprland) zawsze trzyma fd na iGPU (card1 + renderD128) —
-    // matcher "/dev/dri/*" z v5.0 pierwotnego = wiecznie busy (lekcja G1 live).
-    // Audio: NIE controlC<N> — wireplumber (manager dźwięku) trzyma control
-    // permanentnie, gate by nigdy nie puścił. Blokuje TYLKO aktywny PCM playback
-    // (fd na /dev/snd/pcmC<N>D*p); capture (sufiks "c") NIE blokuje.
+    // Skan /proc/*/fd za otwarte fd na renderD<N> dGPU (rozwiązane przez BDF).
+    // Zwraca ścieżkę węzła ("" gdy nikt nie trzyma). WAŻNE: TYLKO renderD<N>
+    // dGPU, NIGDY card<N> dGPU — systemd/logind/Hyprland trzymają card PASYWNIE
+    // i nigdy nie zamykają; w IGD nikt nie modesetuje na dGPU (lekcja
+    // 2026-08-29: po rmmod/modprobe card0=dGPU → "dGPU zajęty" NA STAŁE).
+    // Analogicznie iGPU: Hyprland trzyma card1 + renderD128 iGPU — matcher
+    // "/dev/dri/*" z v5.0 pierwotnego = wiecznie busy (lekcja G1 live).
     // Wzorzec skanu /proc kompilatorów (compiler_running) — bez lsof.
-    static bool fd_busy()
+    std::string open_render_fd()
     {
-        std::set<std::string> nodes = dgpu_drm_nodes();
-        std::string snd_card = dgpu_snd_playback_card();
-        std::string pcm_prefix = snd_card.empty() ? "" : "/dev/snd/pcmC" + snd_card;
-
+        std::set<std::string> nodes = dgpu_render_nodes();
         DIR* d = opendir("/proc");
-        if (!d) return false;
+        if (!d) return "";
         struct dirent* e;
-        bool busy = false;
+        std::string hit;
         while ((e = readdir(d))) {
             if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
             // Daemon nie może blokować sam siebie (własny fd vblank na card<N>).
@@ -2151,17 +2239,44 @@ public:
                 ssize_t n = readlink(lp.c_str(), link, sizeof link - 1);
                 if (n <= 0) continue;
                 link[n] = 0;
+                if (nodes.count(std::string(link))) { hit = link; break; }
+            }
+            closedir(fd);
+            if (!hit.empty()) break;
+        }
+        closedir(d);
+        return hit;
+    }
+
+    // Audio dGPU: czy AKTYWNY PCM playback (fd na /dev/snd/pcmC<N>D*p). NIE
+    // controlC<N> — wireplumber (manager dźwięku) trzyma control permanentnie,
+    // gate by nigdy nie puścił (lekcja G1 live). Capture (sufiks "c") NIE
+    // blokuje. Zwraca true gdy znaleziony aktywny playback.
+    bool audio_playback_active()
+    {
+        std::string snd_card = dgpu_snd_playback_card();
+        if (snd_card.empty()) return false;
+        std::string pcm_prefix = "/dev/snd/pcmC" + snd_card;
+        DIR* d = opendir("/proc");
+        if (!d) return false;
+        struct dirent* e;
+        while ((e = readdir(d))) {
+            if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+            if (std::strtol(e->d_name, nullptr, 10) == (long)getpid()) continue;
+            std::string fddir = std::string("/proc/") + e->d_name + "/fd";
+            DIR* fd = opendir(fddir.c_str());
+            if (!fd) continue;
+            struct dirent* fe;
+            while ((fe = readdir(fd))) {
+                if (fe->d_name[0] == '.') continue;
+                char link[256];
+                std::string lp = fddir + "/" + fe->d_name;
+                ssize_t n = readlink(lp.c_str(), link, sizeof link - 1);
+                if (n <= 0) continue;
+                link[n] = 0;
                 std::string target(link);
-                if (nodes.count(target)) {
-                    busy = true;
-                    closedir(fd);
-                    closedir(d);
-                    return true;
-                }
-                // Audio dGPU: tylko aktywny PCM playback (pcmC<N>D*p).
-                if (!pcm_prefix.empty() && target.rfind(pcm_prefix, 0) == 0 &&
-                    !target.empty() && target.back() == 'p') {
-                    busy = true;
+                // Tylko aktywny PCM playback (pcmC<N>D*p) — sufiks "p".
+                if (target.rfind(pcm_prefix, 0) == 0 && target.back() == 'p') {
                     closedir(fd);
                     closedir(d);
                     return true;
@@ -2170,25 +2285,92 @@ public:
             closedir(fd);
         }
         closedir(d);
-        return busy;
+        return false;
     }
 
-    // Czekaj aż dGPU nie będzie zajęty (brak otwartych fd). Timeout, retry 500 ms.
-    bool wait_idle(int timeout_ms)
+    // power-off gate v2 (D1, raporty 99/100): sam render fd dGPU NIE blokuje —
+    // chromium trzyma pasywny probe fd na renderD129 NA STAŁE (fdinfo puste,
+    // busy=0, gpu-process na iGPU; lekcja 2026-08-29). Deferuj TYLKO gdy dGPU
+    // wykazuje aktywność: busy > BUSY_ACTIVE_PROMILLE w oknie busy-idle-dwell-ms
+    // (mierzonym od ostatniej próbki busy>0, reset przy power-on — set_on()).
+    // Guard g_pmu_config_valid: po utracie konfiguracji liczników (post-resume,
+    // v4.5 self-heal) busy czyta 0 mimo aktywności → bezpiecznie defer.
+    // Audio dGPU (aktywny PCM playback) blokuje NADAL TWARDO — audio nie rusza
+    // liczników GR/CE2, busy mógłby czytać 0 przy odtwarzaniu.
+    // Zwraca GateCheck{block, passive, why}: passive=true = przejściowy dwell
+    // (pasywny fd, busy=0) — informacyjny, nie spamuj; passive=false = realny
+    // bloker (aktywny render / licznik niepewny / PCM dGPU).
+    static constexpr uint32_t BUSY_ACTIVE_PROMILLE = 10; // 1% — próg „aktywności"
+    struct GateCheck {
+        bool block = false;    // czy power-off zablokowany
+        bool passive = false;  // blokada przejściowa (okno dwell, busy=0)
+        std::string why;       // powód (do last_error/status)
+    };
+    GateCheck gate_check(int busy_idle_dwell_ms)
+    {
+        GateCheck r;
+        std::string node = open_render_fd();
+        if (audio_playback_active()) {
+            r.block = true;
+            r.why = "aktywny PCM playback na dGPU";
+            return r;
+        }
+        if (node.empty()) return r;          // nikt nie trzyma → wolny
+        if (!g_pmu_config_valid) {
+            r.block = true;
+            r.why = node + " otwarty + licznik busy PMU niepewny (po recovery) — defer";
+            return r;
+        }
+        auto now = std::chrono::steady_clock::now();
+        if (g_last_busy > BUSY_ACTIVE_PROMILLE) {
+            last_busy_nonzero_ = now;        // aktywny render — świeże okno idle
+            r.block = true;
+            char buf[96];
+            std::snprintf(buf, sizeof buf, "%s otwarty, busy=%u%% — aktywny render",
+                          node.c_str(), (unsigned)((g_last_busy + 50) / 10));
+            r.why = buf;
+            return r;
+        }
+        // Pasywny fd (probe): busy==0. Dwell chroni przed race (klient startuje
+        // render zaraz po decyzji OFF — mpv po torze B). Po spełnieniu okna
+        // busy-idle-dwell-ms → wolny (power-off przechodzi).
+        if (busy_idle_dwell_ms <= 0) return r;   // 0 = gate wyłączony (raport 98)
+        auto idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_busy_nonzero_).count();
+        if (idle_ms < busy_idle_dwell_ms) {
+            r.block = true;
+            r.passive = true;
+            char buf[96];
+            std::snprintf(buf, sizeof buf, "%s otwarty pasywnie (busy=0%% od %dms, dwell %dms)",
+                          node.c_str(), (int)idle_ms, busy_idle_dwell_ms);
+            r.why = buf;
+        }
+        return r;
+    }
+
+    // Czekaj aż power-off może przejść (gate v2: brak render fd LUB dGPU
+    // bezczynny przez busy-idle-dwell-ms; audio dGPU blokuje twardo).
+    // Timeout, retry 500 ms.
+    bool wait_idle(int timeout_ms, int busy_idle_dwell_ms)
     {
         int waited = 0;
         while (waited < timeout_ms) {
-            if (!fd_busy()) return true;
+            if (!gate_check(busy_idle_dwell_ms).block) return true;
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             waited += 500;
         }
-        return !fd_busy();
+        return !gate_check(busy_idle_dwell_ms).block;
     }
 
 private:
     std::string backend_;
     int autosuspend_ms_;
     std::function<bool()> recover_cb_;
+    // v5.13 (D1): timestamp ostatniej próbki busy>0 (gate power-off — dwell
+    // busy-idle-dwell-ms). Reset przy power-on (set_on) — świeży cykl = świeże
+    // okno idle, inaczej OFF przeszedłby natychmiast po power-onie zanim
+    // klient zdąży zacząć render (lekcja raportu 99).
+    std::chrono::steady_clock::time_point last_busy_nonzero_;
 };
 
 // ----------------------------------------------------------- switchd: konsumenci (/proc)
@@ -2580,13 +2762,13 @@ static std::string nvram_prefs_efivarfs()
 
 // Pełny odczyt: efivarfs → raw flash. Wynik "dis"|"igd"|"unknown".
 //
-// v5.3: cache do /run/reclockd/nvram-prefs. Skan raw flash (/dev/mtd0ro) przy
+// v5.3: cache do /run/reclocked/nvram-prefs. Skan raw flash (/dev/mtd0ro) przy
 // każdym starcie gasi kbd backlight: każdy odczyt MTD → ledtrig_mtd_activity()
 // → trigger "nand-disk" na smc::kbd_backlight (applesmc.c:1071) → oneshot blink
 // zostawia LED na 0 → LKSB=0 (raport 80). /run to tmpfs — cache resetuje się
 // przy reboot, co jest poprawne (gpu-power-prefs zmienia się tylko przez
 // firmware przy to-igd/to-dis + reboot). Flash czytany tylko gdy cache brakuje.
-static const char* NVRAM_PREFS_CACHE = "/run/reclockd/nvram-prefs";
+static const char* NVRAM_PREFS_CACHE = "/run/reclocked/nvram-prefs";
 
 static std::string nvram_prefs_read()
 {
@@ -2645,9 +2827,9 @@ public:
     {
         topo_.detect();
         power_state_ = power_.read();
-        // v5.3: mkdir przed nvram_prefs_read — katalog /run/reclockd musi istnieć
+        // v5.3: mkdir przed nvram_prefs_read — katalog /run/reclocked musi istnieć
         // zanim cache nvram-prefs zapisze do niego plik.
-        mkdir("/run/reclockd", 0755);
+        mkdir("/run/reclocked", 0755);
         nvram_prefs_ = nvram_prefs_read();
         mkdir("/run/switchd", 0755);
         logf(1, "switchd: topologia=%s, dGPU=%s, nvram_prefs=%s, backend=%s, "
@@ -2665,7 +2847,7 @@ public:
         std::string fcs, ftitle;
         bool a1 = hypr.activewindow(fcs, ftitle);
 
-        // v5.0: dgpu-override — flag-file /run/reclockd/dgpu-override (on|off),
+        // v5.0: dgpu-override — flag-file /run/reclocked/dgpu-override (on|off),
         // wzorzec fan-override (G). Plik istnieje → wymusza target, policy.decide()
         // nie rusza. Override "off" nadal przechodzi przez bramki apply():
         // wait_idle (po Bug1 puszcza — tylko węzły dGPU) + set_off + wait_off.
@@ -2839,9 +3021,21 @@ private:
                     last_action_ = "blocked-off";
                 } else {
                     logf(1, "switch: power-off dGPU (target=IGPU, topologia=IGD)");
-                    if (!power_.wait_idle(cfg_.wait_idle_timeout_ms)) {
-                        last_error_ = "dGPU zajęty (otwarte fd /dev/dri) — power-off odroczony";
-                        logf(0, "switch: %s", last_error_.c_str());
+                    if (!power_.wait_idle(cfg_.wait_idle_timeout_ms,
+                                          cfg_.busy_idle_dwell_ms)) {
+                        // v5.13 (D1, raport 100): gate świadomy aktywności —
+                        // pasywny render fd (busy=0 przez busy-idle-dwell-ms)
+                        // NIE blokuje power-offu (chromium probe fd — raport 99);
+                        // blokuje realna aktywność / niepewny licznik PMU / PCM.
+                        // Message dynamiczny z powodem z gate'a (zamiast stałego
+                        // "otwarte fd /dev/dri" — mylącego przy pasywnym fd).
+                        DgpuPower::GateCheck g = power_.gate_check(cfg_.busy_idle_dwell_ms);
+                        if (g.why.empty()) g.why = "otwarty render fd dGPU";
+                        last_error_ = "dGPU zajęty (" + g.why + ") — power-off odroczony";
+                        // Pasywny dwell (busy=0, okno 3 s) = stan przejściowy —
+                        // log na poziomie 2 (bez spamu co ~6 s); realny bloker
+                        // (busy>0 / PMU niepewny / PCM) na poziomie 0.
+                        logf(g.passive ? 2 : 0, "switch: %s", last_error_.c_str());
                     } else if (!power_.set_off()) {
                         last_error_ = "set_off nieudany";
                         logf(0, "switch: BŁĄD set_off");
@@ -3073,11 +3267,11 @@ private:
 static void usage(const char* argv0)
 {
     std::printf(
-        "reclockd v5.10 — polityka profilowa (app-aware) + wentylatory + [fan-case] + switchd + [dgpu-active] + override + reload + nvram cache\n"
+        "reclocked v5.13 — polityka profilowa (app-aware) + wentylatory + [fan-case] + switchd + [dgpu-active] + override + reload + nvram cache\n"
         "Użycie: %s [opcje]\n"
         "  switchd (v5.0): dGPU power-state + render routing. W DIS = monitor\n"
         "    (zero zmian power). Sekcje [switch]/[dpower]/[dgpu-hard]/[dgpu-soft]\n"
-        "    /[igpu]/[dgpu-procs]. Status: /run/reclockd/status.\n"
+        "    /[igpu]/[dgpu-procs]. Status: /run/reclocked/status.\n"
         "  [dgpu-active] (v5.6): trójstopniowa polityka dla CAŁEGO dGPU-ON:\n"
         "    baseline (0a) / deep idle (07) / heavy (0e). Aktywność usera przez\n"
         "    evdev (/dev/input/event*). 0e WYŁĄCZNIE busy-driven (busy>busy-enter\n"
@@ -3096,7 +3290,7 @@ static void usage(const char* argv0)
         "  DOWN 0f→0e: temp>temp_up LUB temp>=temp_down (NATYCHMIAST) OR busy<busy_up.\n"
         "  DOWN 0e→0a→07: TERMAL (temp>temp_down przez temp_dwell) OR IDLE\n"
         "                 (busy≤busy_down przez idle_dwell) OR CEILING.\n"
-        "  --config PATH      plik konfigu (domyślnie /etc/reclockd.conf)\n"
+        "  --config PATH      plik konfigu (domyślnie /etc/reclocked.conf)\n"
         "  --interval MS      okres próbkowania (200)\n"
         "  --poll-ms MS       okres pollingu hyprctl (1000)\n"
         "  --busy-up P        %% busy > → UP o 1 poziom (80)\n"
@@ -3190,7 +3384,7 @@ int main(int argc, char** argv)
     }
 
     if (geteuid() != 0) {
-        std::fprintf(stderr, "reclockd: wymaga roota (mmap BAR0 + zapis debugfs)\n");
+        std::fprintf(stderr, "reclocked: wymaga roota (mmap BAR0 + zapis debugfs)\n");
         return 1;
     }
 
@@ -3233,11 +3427,11 @@ int main(int argc, char** argv)
         return true;
     };
     if (!prof_ok(g_cfg.def) || !prof_ok(g_cfg.preferred)) {
-        std::fprintf(stderr, "reclockd: niepoprawne stany w profilach configu\n");
+        std::fprintf(stderr, "reclocked: niepoprawne stany w profilach configu\n");
         return 2;
     }
     if (!known_state(g_cfg.exit_state)) {
-        std::fprintf(stderr, "reclockd: exit-state musi być 07|0a|0e|0f\n");
+        std::fprintf(stderr, "reclocked: exit-state musi być 07|0a|0e|0f\n");
         return 2;
     }
     if (g_cfg.interval_ms <= 0) g_cfg.interval_ms = 200;
@@ -3291,13 +3485,12 @@ int main(int argc, char** argv)
     if (g_cfg.fan_case.enable) {
         smc_case.init();
         logf(1, "fan-case: applesmc etykiety: %d znalezionych, keys=%zu, "
-                "krzywa case %d-%d°C, dwell-in=%dms, hold=%dms, exit-dwell=%dms, "
-                "margin=%d°C, ramp=%d RPM/s",
+                "krzywa case %d-%d°C, soak-enter=%d°C, dwell-in=%dms, "
+                "soak-hold=%dms (wyjście czasowe), ramp=%d RPM/s",
              smc_case.label_count(), g_cfg.fan_case.keys.size(),
              g_cfg.fan_case.case_min, g_cfg.fan_case.case_max,
-             g_cfg.fan_case.dwell_in_ms, g_cfg.fan_case.hold_ms,
-             g_cfg.fan_case.exit_dwell_ms, g_cfg.fan_case.margin,
-             g_cfg.fan_case.ramp_rpm_s);
+             g_cfg.fan_case.soak_enter, g_cfg.fan_case.dwell_in_ms,
+             g_cfg.fan_case.hold_ms, g_cfg.fan_case.ramp_rpm_s);
     } else {
         logf(1, "fan-case: wyłączony w configu (brak/disable [fan-case]) — stary algorytm 1:1");
     }
@@ -3407,10 +3600,9 @@ int main(int argc, char** argv)
     // steady_clock deadline L1390-1407). Stan przetrwa SIGHUP (jak SwitchPolicy).
     enum class FanCaseState { NORMAL, SOAK };
     FanCaseState fan_case_state = FanCaseState::NORMAL;
-    int fan_case_dwell_in = 0;        // ms case > case-min (NORMAL → SOAK)
-    int fan_case_exit_dwell = 0;      // ms case < case-min−margin (SOAK → NORMAL)
+    int fan_case_dwell_in = 0;        // ms case > soak-enter (NORMAL → SOAK)
     double fan_case_entry_avg = -1.0; // case_avg przy wejściu w SOAK (floor)
-    std::chrono::steady_clock::time_point fan_case_hold_until{};
+    std::chrono::steady_clock::time_point fan_case_hold_until{}; // v5.12: koniec pulsy SOAK
     std::set<std::string> missing_case_keys;   // warning o błędnych keys — raz
 
     // v5.4: [dgpu-active] — status w start logu.
@@ -3510,7 +3702,7 @@ int main(int argc, char** argv)
         if (fan_ok && g_cfg.fan_enable && (cycle % poll_cycles) == 0) {
             bool fov = fan_override_active();
             if (fov && !prev_fan_override)
-                logf(1, "fan-override AKTYWNY: hold wentylatorów (flag=/run/reclockd/fan-override)");
+                logf(1, "fan-override AKTYWNY: hold wentylatorów (flag=/run/reclocked/fan-override)");
             if (!fov && prev_fan_override)
                 logf(1, "fan-override ZDJĘTY — wznawiam auto wentylatorów");
             prev_fan_override = fov;
@@ -3567,39 +3759,42 @@ int main(int argc, char** argv)
                                                        g_cfg.fan_case.case_max);
                         auto now = std::chrono::steady_clock::now();
                         if (fan_case_state == FanCaseState::NORMAL) {
-                            // NORMAL → SOAK: case > case-min przez dwell-in
-                            // (counter, wzorzec dwell_out_ L2267-2270).
-                            fan_case_dwell_in = (case_avg > g_cfg.fan_case.case_min)
+                            // v5.12: NORMAL → SOAK: case > soak-enter przez
+                            // dwell-in (counter, wzorzec dwell_out_ L2267-2270).
+                            // Próg = soak-enter (default 45°C — powyżej typowej
+                            // strefy pracy 40-44°C), NIE case-min: case-min leży
+                            // poniżej strefy pracy → "case > case-min" jest
+                            // zawsze prawdą → SOAK wchodziłby wiecznie.
+                            fan_case_dwell_in = (case_avg > g_cfg.fan_case.soak_enter)
                                 ? fan_case_dwell_in + g_cfg.poll_ms : 0;
-                            if (case_avg > g_cfg.fan_case.case_min &&
+                            if (case_avg > g_cfg.fan_case.soak_enter &&
                                 fan_case_dwell_in >= g_cfg.fan_case.dwell_in_ms) {
                                 fan_case_state = FanCaseState::SOAK;
                                 fan_case_entry_avg = case_avg;
                                 fan_case_hold_until = now + std::chrono::milliseconds(
                                     g_cfg.fan_case.hold_ms);
-                                fan_case_exit_dwell = 0;
                                 logf(1, "fan-case: SOAK (case %.1f°C > %d°C przez %d ms, "
-                                        "hold %d ms, floor=krzywa przy %.1f°C)",
-                                     case_avg, g_cfg.fan_case.case_min,
+                                        "pulsa %d ms, floor=krzywa przy %.1f°C)",
+                                     case_avg, g_cfg.fan_case.soak_enter,
                                      fan_case_dwell_in, g_cfg.fan_case.hold_ms,
                                      fan_case_entry_avg);
                             }
                         } else {
-                            // SOAK → NORMAL: dopiero gdy hold wygasł ORAZ case
-                            // < case-min−margin przez exit-dwell (histereza+czas
-                            // — case oscylujący wokół progu nie klapie SOAK).
-                            fan_case_exit_dwell = (case_avg < g_cfg.fan_case.case_min -
-                                                   g_cfg.fan_case.margin)
-                                ? fan_case_exit_dwell + g_cfg.poll_ms : 0;
-                            if (now >= fan_case_hold_until &&
-                                fan_case_exit_dwell >= g_cfg.fan_case.exit_dwell_ms) {
+                            // v5.12: SOAK → NORMAL: CZYSTO CZASOWE wyjście po
+                            // hold-ms (dekadencja czasowa) — JEDYNE gwarantowane
+                            // wyjście: poprzednie (case < case-min−margin) było
+                            // fizycznie nieosiągalne (17/27/37°C) → SOAK wisiał
+                            // wiecznie (zero wyjść w historii 23:46-01:20).
+                            // Re-entry gdy case znów > soak-enter przez dwell-in
+                            // (case gorący → kolejna pulsa; schłodzony → stan
+                            // normalny). Gwarantowany koniec pulsy = brak
+                            // permanentnego SOAK.
+                            if (now >= fan_case_hold_until) {
                                 fan_case_state = FanCaseState::NORMAL;
                                 fan_case_dwell_in = 0;
-                                logf(1, "fan-case: NORMAL (case %.1f°C < %d°C przez %d ms, "
-                                        "hold %d ms minął)",
-                                     case_avg, g_cfg.fan_case.case_min -
-                                     g_cfg.fan_case.margin,
-                                     fan_case_exit_dwell, g_cfg.fan_case.hold_ms);
+                                logf(1, "fan-case: NORMAL (pulsa %d ms minęła, "
+                                        "case %.1f°C)",
+                                     g_cfg.fan_case.hold_ms, case_avg);
                             }
                         }
                         pct_target = std::max(pct_target, pct_case);
@@ -3701,6 +3896,9 @@ int main(int argc, char** argv)
         // i daemon sam schodzi do poprawnego idle.
         uint32_t ctrl_v = gpu.rd(R_IDLE_CTRL + C_TOTAL * 16);
         if ((ctrl_v & CTRL_VALUE_MASK) != CTRL_VALUE_ALWAYS) {
+            // v5.13 (D1): licznik niepewny → gate power-off (D1) deferuje —
+            // busy mógłby czytać 0 mimo aktywności (lekcja raportu 99/100).
+            g_pmu_config_valid = false;
             logf(0, "PMU busy counters config lost (post-resume?) — full recovery (ctrl=%08x)", ctrl_v);
             // v5.0: pełne recovery (kroki 2-10) — liczniki to dopiero początek;
             // power-cycle wymaga też hw.reinit, re-sync g_cur_idx, re-open DRM.
@@ -3710,6 +3908,11 @@ int main(int argc, char** argv)
                 gpu.init_counters();
                 reset_after_transition();   // ring.clear() + dwell=0 — świeże okno busy
             }
+        } else {
+            // v5.13 (D1): readback OK — licznik wiarygodny (gate power-off może
+            // ufać busy). Gdy recovery się nie uda, readback zostaje ≠ ALWAYS →
+            // flag false aż do skutecznego re-init (gate bezpiecznie deferuje).
+            g_pmu_config_valid = true;
         }
 
         ring.push(b);
