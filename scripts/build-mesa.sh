@@ -7,7 +7,8 @@
 # Rebuild: ./build-mesa.sh   (inkrementalny, pomija setup jeśli build istnieje)
 set -euo pipefail
 
-PROJ="$(cd "$(dirname "$0")" && pwd)"
+# PROJ = ROOT repo (skrypt w scripts/ — dirname $0 = scripts, stąd /..)
+PROJ="$(cd "$(dirname "$0")/.." && pwd)"
 MESA="$PROJ/tmp/mesa"
 PATCH="$PROJ/patches/0002-mesa-nvc0-sched-data.patch"
 BUILD="$MESA/build-nouveau"
@@ -65,7 +66,7 @@ else
     # Opcje zweryfikowane pod mesa 26.x (meson.options):
     #   gallium-opencl / gallium-vdpau NIE ISTNIEJĄ (clover usunięte) — nie używaj.
     #   gallium-rusticl = boolean (default false), gallium-va = feature, llvm = feature.
-    meson setup "$BUILD" \
+    meson setup "$BUILD" "$MESA" \
         -Dgallium-drivers=nouveau \
         -Dvulkan-drivers= \
         -Dgallium-rusticl=false \

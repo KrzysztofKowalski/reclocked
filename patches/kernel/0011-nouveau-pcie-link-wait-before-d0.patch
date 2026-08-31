@@ -22,12 +22,12 @@ instead of continuing against a dead device.
 
 Signed-off-by: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
 ---
- drivers/gpu/drm/nouveau/nouveau_drm.c |   44 ++++++++++++++++++++++++++-------
- 1 file changed, 35 insertions(+), 9 deletions(-)
+ drivers/gpu/drm/nouveau/nouveau_drm.c |   46 +++++++++++++++++++++++++++++++---
+ 1 file changed, 35 insertions(+), 10 deletions(-)
 
 --- a/drivers/gpu/drm/nouveau/nouveau_drm.c	2026-08-27 16:39:01.417208535 +0200
 +++ b/drivers/gpu/drm/nouveau/nouveau_drm.c	2026-08-27 16:39:11.926806392 +0200
-@@ -1060,6 +1060,35 @@
+@@ -1059,6 +1059,35 @@
  	return 0;
  }
  
@@ -66,7 +66,7 @@ Signed-off-by: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
 @@ -1071,8 +1100,9 @@
  	    drm->dev->switch_power_state == DRM_SWITCH_POWER_DYNAMIC_OFF)
  		return 0;
- 
+
 -	pci_set_power_state(pdev, PCI_D0);
 -	udelay(200);
 +	ret = nouveau_pci_resume(pdev);
@@ -78,7 +78,7 @@ Signed-off-by: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
 @@ -1253,13 +1283,9 @@
  		return -EBUSY;
  	}
- 
+
 -	pci_set_power_state(pdev, PCI_D0);
 -	/* Wait for the D0 transition to settle before touching the device: a
 -	 * hard power-cycle wiped the VBIOS and PCIe link state, and accessing

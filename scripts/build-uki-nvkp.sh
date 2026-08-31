@@ -18,14 +18,21 @@
 # Reboot i wybór wpisu 'nvkp' — Ty.
 set -euo pipefail
 
-PROJ="$(cd "$(dirname "$0")" && pwd)"
-KREL="7.1.8-nvkp-dirty"          # uname -r po booth (CONFIG_LOCALVERSION_AUTO=y + dirty tree)
+# PROJ = ROOT repo (skrypt siedzi w scripts/ — dirname $0 = scripts, stąd /..)
+PROJ="$(cd "$(dirname "$0")/.." && pwd)"
+# KREL: najnowszy katalog *-nvkp* w /usr/lib/modules (np. 7.1.9-nvkp-dirty —
+# CONFIG_LOCALVERSION_AUTO=y + patche uncommitted = dirty). Odpal TEN skrypt
+# PO build-kernel.sh (moduły + vmlinuz już zainstalowane); env KREL nadpisuje.
+KREL="${KREL:-$(cd /usr/lib/modules 2>/dev/null && ls -1d -- *-nvkp* 2>/dev/null | sort -V | tail -1 || true)}"
+[ -n "$KREL" ] || { echo "BŁĄD: brak katalogu *-nvkp* w /usr/lib/modules — odpal najpierw build-kernel.sh" >&2; exit 1; }
 KNAME="linux-nvkp"              # pliki w /boot: vmlinuz-linux-nvkp, initramfs-linux-nvkp.img
 UKI_NAME="nvkp"                 # nazwa wpisu w menu Limine (//nvkp)
 CONF="/etc/mkinitcpio-nvkp.conf"
 INITRAMFS="/boot/initramfs-${KNAME}.img"
 VMLINUZ="/boot/vmlinuz-${KNAME}"
-UKI="/boot/EFI/Linux/${UKI_NAME}.efi"
+# UKI plik: omarchy_nvkp.efi — aktualny wpis //nvkp w limine.conf wskazuje tę nazwę
+# (snapper omarchy robi snapshoty omarchy_*; nvkp.efi z 2026-07-23 to sierota do ręcznego usunięcia).
+UKI="/boot/EFI/Linux/omarchy_nvkp.efi"
 MODULES_DIR="/usr/lib/modules/${KREL}"
 TMP="$PROJ/tmp/uki-build"
 CMDLINE_FILE="$TMP/nvkp-cmdline.txt"
@@ -114,12 +121,19 @@ echo
 
 # --- 5. usuń stary wpis //linux-nvkp (protocol: linux, zepsuty) ---------------
 bold "[5/5] Usuwam stary wpis //linux-nvkp (protocol: linux)"
-if limine-entry-tool --tree 2>/dev/null | grep -q 'linux-nvkp'; then
-  sudo -n limine-entry-tool --remove-kernel "${KNAME}" --quiet \
-    && green "    Stary wpis //${KNAME} usunięty." \
-    || yellow "    Nie udało się usunąć //${KNAME} — usuń ręcznie: sudo limine-entry-tool --remove-kernel ${KNAME}"
-else
-  yellow "    Wpis //${KNAME} nie istnieje — pomijam."
+# Uwaga: NIE `limine-entry-tool --tree | grep -q` — pipefail + grep -q zamyka rurę
+# wcześniej → limine-entry-tool dostaje SIGPIPE → fałszywy negatyw (lekcja pipefail).
+if TREE_OUT="$(limine-entry-tool --tree 2>/dev/null)"; then
+  case "$TREE_OUT" in
+    *linux-nvkp*)
+      sudo -n limine-entry-tool --remove-kernel "${KNAME}" --quiet \
+        && green "    Stary wpis //${KNAME} usunięty." \
+        || yellow "    Nie udało się usunąć //${KNAME} — usuń ręcznie: sudo limine-entry-tool --remove-kernel ${KNAME}"
+      ;;
+    *)
+      yellow "    Wpis //${KNAME} nie istnieje — pomijam."
+      ;;
+  esac
 fi
 echo
 

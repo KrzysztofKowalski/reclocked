@@ -3,7 +3,7 @@
 #
 # Strategia (Mesa 26.x, architektura "dril"):
 #   /usr/lib/dri/*_dri.so  ->  libdril_dri.so   (wspólny dispatcher ~96 KB)
-#   /usr/lib/dri/libdril_dri.so  dlopenuje  /usr/lib/libgallium-<version>.so  (~54 MB)
+#   /usr/lib/dri/libdril_dri.so  dlopenuje  /usr/lib/libgallium-26.1.8-arch1.1.so  (~54 MB)
 #   /usr/lib/dri/nouveau_dri.so  = SYMLINK  -> libdril_dri.so
 #
 # Łatana Mesa (nouveau-only) buduje self-contained libdril_dri.so (~2.8 MB) ze
@@ -18,10 +18,11 @@
 # Komendy: status | backup | install | restore | diff
 # Flagi:   --yes (bez potwierdzeń), --force (nadpisz backup), --dry-run
 #
-# NIE używa systemowego /tmp — scratch w $PROJ/tmp/ (obok skryptu).
+# NIE używa systemowego /tmp — scratch w /home/k/Projects/nv-kepler/tmp/.
 set -euo pipefail
 
-PROJ="$(cd "$(dirname "$0")" && pwd)"
+# PROJ = ROOT repo (skrypt w scripts/ — dirname $0 = scripts, stąd /..)
+PROJ="$(cd "$(dirname "$0")/.." && pwd)"
 MESA="$PROJ/tmp/mesa"
 BUILD="$MESA/build-nouveau"
 DRIL_DIR="$BUILD/src/gallium/targets/dril"      # tu leży zbudowany nouveau_dri.so -> libdril_dri.so

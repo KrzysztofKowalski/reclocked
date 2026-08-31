@@ -4,7 +4,7 @@
 # Buduje OSOBNY wpis jądra z LOCALVERSION=-nvkp — NIE nadpisuje działającego jądra:
 #   - moduły       → /lib/modules/<rev>-nvkp
 #   - /boot        → vmlinuz-linux-nvkp, initramfs-linux-nvkp.img, System.map-linux-nvkp
-#   - bootloader   → GRUB (grub-mkconfig) albo Limine (wpis automatyczny z --limine)
+#   - bootloader   → wpis //nvkp robi build-uki-nvkp.sh (UKI, protocol: efi)
 #
 # Kluczowy patch: 0007-nouveau-reinit-gk107-after-power-cut.patch — reinit GK107
 # po power-cut (power-on switchd v5.0). Kolejność patchy: 0001 → 0015.
@@ -19,22 +19,24 @@
 # wentylatory do 100% samoczynnie → pełne -j$(nproc) jest bezpieczne.
 #
 # Użycie:
-#   ./build-kernel.sh                — pełna ścieżka (config → build → moduły → /boot → bootloader)
+#   ./build-kernel.sh                — pełna ścieżka (config → build → moduły → /boot)
+#   ./build-kernel.sh --kver=7.1.9   — sync drzewa do v7.1.9 (fetch ze stable + checkout) i buduj
 #   ./build-kernel.sh --jobs=N       — ograniczenie równoległości (default: $(nproc))
-#   ./build-kernel.sh --no-install   — tylko build (bez modułów//boot/initramfs/bootloadera)
+#   ./build-kernel.sh --no-install   — tylko build (bez modułów//boot/initramfs)
 #   ./build-kernel.sh --clean        — make mrproper przed buildem
 #   ./build-kernel.sh --full-tree    — zamień sparse-checkout na PEŁNE drzewo (wymagane do builda)
-#   ./build-kernel.sh --limine       — przy bootloaderze Limine: dołóż wpis do /boot/limine.conf
 set -euo pipefail
 
-PROJ="$(cd "$(dirname "$0")" && pwd)"
+# PROJ = ROOT repo (skrypt siedzi w scripts/ — dirname $0 = scripts, stąd /..)
+PROJ="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${SRC:-$PROJ/tmp/linux-nouveau}"
 PATCH_KERNEL="$PROJ/patches/kernel"
 PATCH_GENERIC="$PROJ/patches"
 LOCALVERSION="-nvkp"
 BOOT_PREFIX="linux-nvkp"            # pliki w /boot: vmlinuz-linux-nvkp, initramfs-linux-nvkp.img
 LOG="${LOG:-$PROJ/tmp/build-kernel.log}"
-PATCH_STAMP="$SRC/.nvkp-patches.stamp"   # znacznik „patche nałożone” — idempotencja re-runów
+PATCH_STAMP="$SRC/.nvkp-patches.stamp"   # „<git HEAD>:<digest patchy>” — idempotencja re-runów
+                                        # (zmiana wersji drzewa zmienia HEAD → patche aplikują się od nowa)
 
 # ----------------------------------------------------------------------------
 # Argumenty
@@ -42,7 +44,7 @@ PATCH_STAMP="$SRC/.nvkp-patches.stamp"   # znacznik „patche nałożone” — 
 CLEAN=false
 NO_INSTALL=false
 FULL_TREE=false
-LIMINE_APPLY=false
+KVER=""
 JOBS="$(nproc 2>/dev/null || echo 4)"
 
 usage() {
@@ -55,7 +57,7 @@ while [ $# -gt 0 ]; do
     --clean)        CLEAN=true ;;
     --no-install)   NO_INSTALL=true ;;
     --full-tree)    FULL_TREE=true ;;
-    --limine)       LIMINE_APPLY=true ;;
+    --kver=*)       KVER="${1#*=}" ;;
     -h|--help)      usage; exit 0 ;;
     *) echo "BŁĄD: nieznany argument: $1" >&2; usage; exit 1 ;;
   esac
@@ -194,6 +196,34 @@ check_full_tree
 [ -d scripts ] || { echo "BŁĄD: brak scripts/ w $SRC — drzewo niekompletne." >&2; exit 1; }
 
 # --------------------------------------------------------------------------
+# 0. Sync drzewa do zadanego taga (--kver) — przy nowym wydaniu jądra
+# --------------------------------------------------------------------------
+if [ -n "$KVER" ]; then
+  TARGET="v${KVER#v}"
+  if [ "$(git describe --tags 2>/dev/null || true)" = "$TARGET" ]; then
+    echo ">>> [0/9] drzewo już na $TARGET — bez fetchu/checkoutu"
+  else
+    echo ">>> [0/9] Sync drzewa do $TARGET (fetch ze stable + checkout -f)..."
+    echo "    UWAGA: checkout -f ODRZUCA niezcommitowane zmiany w drzewie"
+    echo "    (stare patche + eksperymenty). Właściwe patche aplikują się w kroku 2."
+    if ! git rev-parse --verify "$TARGET" >/dev/null 2>&1; then
+      git fetch --depth 1 stable tag "$TARGET" \
+        || die "fetch $TARGET ze stable nie powiódł się — sprawdź sieć (git.kernel.org) i ponów"
+    fi
+    if ! git checkout -f "$TARGET" 2>"$PROJ/tmp/checkout-$TARGET.err"; then
+      sed 's/^/    /' "$PROJ/tmp/checkout-$TARGET.err" >&2 || true
+      die "checkout $TARGET nie powiódł się — błąd powyżej (zobacz też git status)"
+    fi
+    rm -f "$PROJ/tmp/checkout-$TARGET.err"
+    # artefakty builda poprzedniej wersji (generowane, untracked) — checkout ich nie rusza
+    git clean -fd lib/raid/raid6 2>/dev/null || true
+    echo "    drzewo: $(git describe --tags 2>/dev/null || git rev-parse --short HEAD)"
+  fi
+else
+  echo ">>> [0/9] bez --kver — buduję z aktualnego drzewa ($(git describe --tags 2>/dev/null || git rev-parse --short HEAD))"
+fi
+
+# --------------------------------------------------------------------------
 # 1. [opcjonalnie] make mrproper
 # --------------------------------------------------------------------------
 if [ "$CLEAN" = true ]; then
@@ -208,7 +238,8 @@ fi
 # --------------------------------------------------------------------------
 echo ">>> [2/9] Aplikacja patchy z $PATCH_KERNEL (i $PATCH_GENERIC)..."
 digest="$(patches_digest "${PATCH_NAMES[@]}")"
-if [ -f "$PATCH_STAMP" ] && [ "$(cat "$PATCH_STAMP" 2>/dev/null)" = "$digest" ]; then
+stamp_new="$(git rev-parse HEAD):$digest"
+if [ -f "$PATCH_STAMP" ] && [ "$(cat "$PATCH_STAMP" 2>/dev/null)" = "$stamp_new" ]; then
   echo "    SKIP wszystkie ${#PATCH_NAMES[@]} patchy — już nałożone (stamp zgodny: $PATCH_STAMP)"
 else
   # Per-patch detekcja „już nałożony” (git apply --check --reverse) NIE działa dla
@@ -224,7 +255,7 @@ else
     p="$(find_patch "$name")" || die "nie znaleziono patcha $name w $PATCH_KERNEL ani $PATCH_GENERIC"
     apply_patch "$p"
   done
-  printf '%s\n' "$digest" > "$PATCH_STAMP"
+  printf '%s\n' "$stamp_new" > "$PATCH_STAMP"
   echo "    Stamp zapisany: $PATCH_STAMP (re-run pominie aplikację patchy)"
 fi
 
@@ -321,52 +352,19 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# 9. Bootloader (GRUB albo Limine — na tej maszynie jest Limine)
+# 9. Bootloader — wpis Limine //nvkp robi build-uki-nvkp.sh (UKI, protocol: efi)
 # --------------------------------------------------------------------------
-bootloader_entry() {
-  # Blok wpisu Limine (protokół linux) dla nowego jądra. Linux protocol → osobne
-  # kernel+initramfs (bez UKI); boot():/vmlinuz-linux-nvkp to plik na ESP (=/boot).
-  local cmdline
-  cmdline="$(tr '\n' ' ' < /proc/cmdline 2>/dev/null || true)"
-  printf '%s\n' \
-    "/+Linux-nvkp" \
-    "### nv-kepler: jądro $KREL z patchami switchd v5.0" \
-    "comment: Kernel $KREL (nv-kepler patched)" \
-    "protocol: linux" \
-    "kernel_path: boot():/vmlinuz-$BOOT_PREFIX" \
-    "module_path: boot():/initramfs-$BOOT_PREFIX.img" \
-    "cmdline: $cmdline"
-}
-
 if [ "$NO_INSTALL" = false ]; then
-  echo ">>> [9/9] Aktualizacja wpisu bootloadera..."
+  echo ">>> [9/9] Bootloader: boot przez UKI (protocol: efi — jak Omarchy)."
   # /boot na tym MBP to ESP FAT32 montowane z fmask=0077 (drwx------) → zwykły user
-  # NIE MA odczytu /boot. Detekcja bootloadera musi iść przez `sudo -n test ...`,
-  # a nie przez `[ -f ... ]` (testowy user zawsze zwróci false i wpadnie do else).
-  # need_sudo już wołany w kroku 6 (jeśli NO_INSTALL=false) — sudo -n działa tu pewnie.
-  if command -v grub-mkconfig >/dev/null 2>&1 && sudo -n test -d /boot/grub; then
-    need_sudo
-    echo "    GRUB wykryty: grub-mkconfig -o /boot/grub/grub.cfg"
-    sudo -n grub-mkconfig -o /boot/grub/grub.cfg
-    echo "    Nowy wpis vmlinuz-$BOOT_PREFIX dodany — wybierz go w menu GRUB."
-  elif sudo -n test -f /boot/limine.conf; then
-    echo "    Wykryto Limine (nie GRUB) — grub-mkconfig nie istnieje na tej maszynie."
-    echo
-    echo "    Proponowany wpis do /boot/limine.conf (kernel+initramfs osobno):"
-    bootloader_entry | sed 's/^/      /'
-    echo
-    if [ "$LIMINE_APPLY" = true ]; then
-      need_sudo
-      echo "    --limine: dopisuję wpis do /boot/limine.conf (backup: limine.conf.bak-nvkp)"
-      sudo -n cp /boot/limine.conf /boot/limine.conf.bak-nvkp
-      { echo; echo "# --- nvkp entry (auto, $(date '+%F %T')) ---"; bootloader_entry; } \
-        | sudo -n tee -a /boot/limine.conf >/dev/null
-      echo "    Wpis dopisany — w menu Limine wybierz 'Linux-nvkp'. Stare wpisy bez zmian."
-    else
-      echo "    Aby dopisać automatycznie: ./build-kernel.sh --limine (po zakończeniu tego buildu)."
-    fi
+  # NIE MA odczytu /boot. Detekcja przez `sudo -n test ...`, nie przez `[ -f ... ]`.
+  if sudo -n test -f /boot/limine.conf; then
+    echo "    Wpis //nvkp aktualizuje osobny skrypt (UKI + limine-entry-tool):"
+    echo "      sudo bash $PROJ/scripts/build-uki-nvkp.sh"
+    echo "    Wpis protocol: linux już nie powstaje — czarny ekran (VGACON na"
+    echo "    wyłączonym dGPU; boot idzie przez UKI nvkp)."
   else
-    echo "    UWAGA: nie wykryto GRUB-a ani Limine — dodaj wpis bootloadera ręcznie."
+    echo "    UWAGA: brak /boot/limine.conf — sprawdź bootloader ręcznie."
   fi
 else
   echo ">>> [9/9] pomijam bootloader (--no-install)"
@@ -386,5 +384,5 @@ if [ "$NO_INSTALL" = false ]; then
   echo "Na tym systemie stare jądro to UKI w /boot/EFI/Linux/omarchy_linux.efi — nie ruszone."
 fi
 echo
-echo "Reboot i w menu boot wybierz nowy wpis. Po testach wróć do starego jądra:"
-echo "  wybierz stary wpis w menu albo (Limine) zmień default_entry w /boot/limine.conf."
+echo "Następny krok: sudo bash $PROJ/scripts/build-uki-nvkp.sh   (UKI + wpis //nvkp)"
+echo "Potem reboot i wybierz 'nvkp' w menu Limine. Stary wpis Omarchy nadal działa."

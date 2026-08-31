@@ -44,8 +44,9 @@
 # dGPU → Off. Skrypt idempotentny: daemon start/dgpu-on tylko gdy trzeba.
 set -uo pipefail
 
-PROJ="$(cd "$(dirname "$0")" && pwd)"
-RECLOCKCTL="${RECLOCKCTL:-$PROJ/reclocked/reclockctl}"
+# PROJ = ROOT repo (skrypt w scripts/ — dirname $0 = scripts, stąd /..)
+PROJ="$(cd "$(dirname "$0")/.." && pwd)"
+RECLOCKCTL="${RECLOCKCTL:-$PROJ/src/reclockctl}"
 APPLESMC="/sys/devices/platform/applesmc.768"
 VGASW="/sys/kernel/debug/vgaswitcheroo/switch"
 PSTATE_FILE="/sys/kernel/debug/dri/0000:01:00.0/pstate"
