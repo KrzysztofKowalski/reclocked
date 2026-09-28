@@ -1867,15 +1867,218 @@ static bool hyprctl_json(const std::string& cmd, std::string& out)
     return true;
 }
 
+// ----------------------------------------------------------- SwayMsg: backend Sway
+// v5.7: soporte Sway/swayfx para los perfiles por-app. Misma interfaz que HyprCtl
+// para que tick() no cambie. HyprCtl queda como fachada: intenta Hyprland y, si
+// no lo encuentra, Sway.
+//
+// Sway no tiene equivalente de `hyprctl -j activewindow`. Lo mas cercano es el
+// arbol de contenedores (`swaymsg -t get_tree`), donde UN solo nodo trae
+// "focused": true. Para el window class usamos `app_id` (mismo concepto que
+// `class` en Hyprland) con `name` como fallback; Sway NO usa
+// window_properties.title como lo hace Hyprland, el titulo va en `name`.
+//
+// Parseo en C++ con los mismos helpers que ya usa el proyecto (json_str /
+// json_str_all), sin dependencia de jq. jq queda como fallback por si el arbol
+// trae una forma que el parser no entiende (fallback silencioso a "sin perfiles"
+// con el log de siempre).
+class SwayMsg {
+public:
+    // Skan /run/user/<uid>/sway-ipc.*.sock. El socket es srwxr-xr-x, root entra.
+    bool detect()
+    {
+        DIR* run = opendir("/run/user");
+        if (!run) return false;
+        struct dirent* e;
+        while ((e = readdir(run))) {
+            if (e->d_name[0] == '.') continue;
+            std::string base = std::string("/run/user/") + e->d_name;
+            DIR* ud = opendir(base.c_str());
+            if (!ud) continue;
+            struct dirent* ue;
+            while ((ue = readdir(ud))) {
+                std::string n = ue->d_name;
+                if (n.rfind("sway-ipc.", 0) != 0) continue;
+                if (n.find(".sock") == std::string::npos) continue;
+                uid_ = std::atoi(e->d_name);
+                sock_ = n;
+                closedir(ud);
+                closedir(run);
+                apply_env();
+                return true;
+            }
+            closedir(ud);
+        }
+        closedir(run);
+        return false;
+    }
+
+    void apply_env()
+    {
+        std::string xdg = "/run/user/" + std::to_string(uid_);
+        setenv("XDG_RUNTIME_DIR", xdg.c_str(), 1);
+        // swaymsg NO lee WAYLAND_DISPLAY: necesita SWAYSOCK con la ruta
+        // completa, si no falla con "Unable to retrieve socket path".
+        std::string sock = xdg + "/" + sock_;
+        setenv("SWAYSOCK", sock.c_str(), 1);
+        setenv("WAYLAND_DISPLAY", sock_.c_str(), 1);
+    }
+
+    // Nodo enfocado: app_id (o name) y title (name).
+    bool activewindow(std::string& cls, std::string& title)
+    {
+        std::string tree;
+        if (!get_tree(tree)) return false;
+
+        std::string obj;
+        if (focused_object(tree, obj)) {
+            std::string app;
+            if (json_str(obj, "app_id", app) && !app.empty()) {
+                cls = app;
+            } else if (json_str(obj, "name", cls)) {
+                // sin app_id: el nombre del nodo hace de clase
+            } else {
+                return false;
+            }
+            // El titulo en Sway esta en `name` (no en window_properties.title
+            // como en Hyprland). Si no hay app_id, `name` ya se uso de clase.
+            title.clear();
+            std::string t;
+            if (json_str(obj, "name", t)) title = t;
+            return !cls.empty();
+        }
+        // Fallback: si el brace-match no encuentra el objeto (arbol con una
+        // forma inesperada), delegated a jq. Si tampoco esta, sin perfiles.
+        return activewindow_jq(cls, title);
+    }
+
+    // Todos los app_id de los contenedores.
+    bool clients(std::vector<std::string>& classes)
+    {
+        std::string tree;
+        if (!get_tree(tree)) return false;
+        classes.clear();
+        json_str_all(tree, "app_id", classes);
+        if (classes.empty()) return clients_jq(classes);
+        return true;
+    }
+
+    int uid() const { return uid_; }
+    const std::string& his() const { return sock_; }
+
+private:
+    // Corre un comando y devuelve su stdout. Devuelve false si no hay salida.
+    static bool run_cmd(const std::string& cmd, std::string& out)
+    {
+        std::string full = cmd + " 2>/dev/null";
+        FILE* p = popen(full.c_str(), "r");
+        if (!p) return false;
+        char buf[4096];
+        size_t n;
+        out.clear();
+        while ((n = std::fread(buf, 1, sizeof buf, p)) > 0) out.append(buf, n);
+        int st = pclose(p);
+        if (st != 0 || out.empty()) return false;
+        return true;
+    }
+
+    static bool get_tree(std::string& out) { return run_cmd("swaymsg -t get_tree", out); }
+
+    // Corta el objeto JSON que contiene `"focused": true`. Cuenta llaves
+    // fuera de strings (un titulo puede traer '{' o '}'), asi que lleva un flag
+    // in_string que ignora llaves dentro de comillas.
+    static bool focused_object(const std::string& tree, std::string& obj)
+    {
+        const std::string pat = "\"focused\": true";
+        size_t k = tree.find(pat);
+        if (k == std::string::npos) return false;
+        // Hacia atras hasta la '{' que abre este objeto.
+        size_t open = std::string::npos;
+        bool in_str = false;
+        for (size_t i = k; i-- > 0;) {
+            char c = tree[i];
+            if (c == '"' && (i == 0 || tree[i - 1] != '\\')) in_str = !in_str;
+            if (!in_str && c == '{') { open = i; break; }
+        }
+        if (open == std::string::npos) return false;
+        // Hacia adelante hasta la '}' que cierra, contando profundidad.
+        size_t depth = 0;
+        in_str = false;
+        for (size_t i = open; i < tree.size(); i++) {
+            char c = tree[i];
+            if (c == '"' && (i == 0 || tree[i - 1] != '\\')) in_str = !in_str;
+            if (in_str) continue;
+            if (c == '{') depth++;
+            else if (c == '}') {
+                depth--;
+                if (depth == 0) { obj = tree.substr(open, i - open + 1); return true; }
+            }
+        }
+        return false;
+    }
+
+    // ---- fallbacks con jq (por si el parseo C++ no alcanza) ----
+    static bool activewindow_jq(std::string& cls, std::string& title)
+    {
+        std::string out;
+        if (!run_cmd("swaymsg -t get_tree | jq -r '.. | select(.focused? == true) | "
+                     "(.app_id // .name // empty), "
+                     "(.window_properties.title // .name // empty)'",
+                     out))
+            return false;
+        std::vector<std::string> lines, real;
+        std::string cur;
+        for (char c : out) {
+            if (c == '\n') { lines.push_back(cur); cur.clear(); }
+            else if (c != '\r') cur += c;
+        }
+        if (!cur.empty()) lines.push_back(cur);
+        for (auto& l : lines)
+            if (!l.empty()) real.push_back(l);
+        if (real.empty()) return false;
+        cls = real[0];
+        title = real.size() > 1 ? real[1] : std::string();
+        return !cls.empty();
+    }
+
+    static bool clients_jq(std::vector<std::string>& classes)
+    {
+        std::string out;
+        if (!run_cmd("swaymsg -t get_tree | jq -r '.. | .app_id? // empty' | sort -u", out))
+            return false;
+        classes.clear();
+        std::string cur;
+        for (char c : out) {
+            if (c == '\n') { if (!cur.empty()) classes.push_back(cur); cur.clear(); }
+            else if (c != '\r') cur += c;
+        }
+        if (!cur.empty()) classes.push_back(cur);
+        return !classes.empty();
+    }
+
+    int uid_ = -1;
+    std::string sock_;
+};
+
 // ----------------------------------------------------------- HyprCtl: detekcja
 
 class HyprCtl {
 public:
-    // Znajdź instancję Hyprlanda: skan /run/user/<uid>/hypr/<his>/hyprland.lock.
-    // Ustaw env XDG_RUNTIME_DIR + HYPRLAND_INSTANCE_SIGNATURE żeby hyprctl
-    // (uruchamiany jako root przez popen) połączył się z socketem usera.
-    // Socket .socket.sock ma mode srwxr-xr-x — root może się połączyć.
+    // Intenta Hyprland y, si no esta, Sway (v5.7). Fachada para que los call
+    // sites de tick() no cambien.
     bool detect()
+    {
+        if (detect_hypr()) return true;
+        if (sway_.detect()) {
+            backend_ = &sway_;
+            return true;
+        }
+        backend_ = nullptr;
+        return false;
+    }
+
+    // La deteccion Hyprland pura (sin fallback a Sway).
+    bool detect_hypr()
     {
         DIR* run = opendir("/run/user");
         if (!run) return false;
@@ -1896,6 +2099,7 @@ public:
                     closedir(hd);
                     closedir(run);
                     apply_env();
+                    backend_ = this;
                     return true;
                 }
             }
@@ -1912,34 +2116,44 @@ public:
         setenv("HYPRLAND_INSTANCE_SIGNATURE", his_.c_str(), 1);
     }
 
-    // Aktywne okno (focus). Zwraca false gdy brak (tty / hyprctl niedostępne).
-    // v4.1: zwraca też title (do detekcji Discord/YouTube po tytule — są kartami
-    // w przeglądarce, nie mają własnej klasy okna).
+    // Delegan al backend activo (Hyprland o Sway).
     bool activewindow(std::string& cls, std::string& title)
     {
+        if (backend_ == &sway_) return sway_.activewindow(cls, title);
         std::string json;
         if (!hyprctl_json("activewindow", json)) return false;
         if (json.find("\"class\"") == std::string::npos) return false; // puste
         bool ok = json_str(json, "class", cls);
-        json_str(json, "title", title); // opcjonalne — brak title nie psuje class
+        json_str(json, "title", title); // opcjonalne
         return ok;
     }
 
-    // Wszystkie uruchomione clienci (class). Zwraca false gdy niedostępne.
     bool clients(std::vector<std::string>& classes)
     {
+        if (backend_ == &sway_) return sway_.clients(classes);
         std::string json;
         if (!hyprctl_json("clients", json)) return false;
         json_str_all(json, "class", classes);
         return true;
     }
 
-    int uid() const { return uid_; }
-    const std::string& his() const { return his_; }
+    int uid() const { return backend_ == &sway_ ? sway_.uid() : uid_; }
+    const std::string& his() const
+    {
+        return backend_ == &sway_ ? sway_.his() : his_;
+    }
+    bool is_sway() const { return backend_ == &sway_; }
+    const char* backend_name() const
+    {
+        return backend_ == &sway_ ? "sway" : (backend_ ? "hyprland" : "ninguno");
+    }
 
 private:
     int uid_ = -1;
     std::string his_;
+    SwayMsg sway_;
+    // nullptr = sin backend; this = Hyprland; &sway_ = Sway.
+    void* backend_ = nullptr;
 };
 
 // ----------------------------------------------------------- override flag-file
@@ -3526,7 +3740,8 @@ int main(int argc, char** argv)
     HyprCtl hypr;
     bool hypr_ok = hypr.detect();
     if (hypr_ok)
-        logf(1, "hyprctl: uid=%d HIS=%s", hypr.uid(), hypr.his().c_str());
+        logf(1, "compositor: %s uid=%d sock=%s", hypr.backend_name(), hypr.uid(),
+             hypr.his().c_str());
     else
         logf(0, "UWAGA: Hyprland niewykryty (/run/user/*/hypr/*/hyprland.lock) — "
                 "fallback do profilu default (cap 07)");
@@ -3964,11 +4179,11 @@ int main(int argc, char** argv)
                 if (a2) running_classes = rcs; else running_classes.clear();
                 // Jeśli oba zawiodły — może Hyprland zrestartowany. Re-detect.
                 if (!a1 && !a2) {
-                    logf(0, "hyprctl niedostępny — re-detect instancji");
+                    logf(0, "compositor niedostępny — re-detect instancji");
                     if (hypr.detect()) {
                         hypr.apply_env();
-                        logf(1, "hyprctl re-detected: uid=%d HIS=%s",
-                             hypr.uid(), hypr.his().c_str());
+                        logf(1, "compositor re-detected: %s uid=%d sock=%s",
+                             hypr.backend_name(), hypr.uid(), hypr.his().c_str());
                     } else {
                         hypr_alive = false;
                         logf(0, "Hyprland zniknął — fallback do default");
@@ -3979,8 +4194,8 @@ int main(int argc, char** argv)
                 if (hypr.detect()) {
                     hypr.apply_env();
                     hypr_alive = true;
-                    logf(1, "hyprctl detected: uid=%d HIS=%s (sesja gotowa)",
-                         hypr.uid(), hypr.his().c_str());
+                    logf(1, "compositor detected: %s uid=%d sock=%s (sesja gotowa)",
+                         hypr.backend_name(), hypr.uid(), hypr.his().c_str());
                     // Natychmiastowy poll tego cyklu — pref_sig nie czeka kolejny poll_ms.
                     std::string fcs, ftitle;
                     std::vector<std::string> rcs;
