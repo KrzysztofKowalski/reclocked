@@ -32,45 +32,47 @@ present on this specific board could not be verified read-only (needs an
 acpidump/sysfs check at runtime); i915 can operate with EDID/DPCD-only
 panel info if the VBT is absent, so this is not a blocker for the retry.
 
+The retry uses a block-local counter so the hunk does not depend on the
+newer "int ret;" declaration and applies to both v6.18 and current
+mainline trees.
+
 Signed-off-by: Krzysztof Kowalski <krzysztof7kowalski@gmail.com>
 ---
- drivers/gpu/drm/i915/display/intel_dp.c | 20 +++++++++++++++++---
- 1 file changed, 17 insertions(+), 3 deletions(-)
+ drivers/gpu/drm/i915/display/intel_dp.c | 23 +++++++++++++++++++++--
+ 1 file changed, 21 insertions(+), 2 deletions(-)
 
 diff --git i/drivers/gpu/drm/i915/display/intel_dp.c w/drivers/gpu/drm/i915/display/intel_dp.c
 index 113d767e6..8eae7a178 100644
 --- i/drivers/gpu/drm/i915/display/intel_dp.c
 +++ w/drivers/gpu/drm/i915/display/intel_dp.c
-@@ -4770,12 +4770,29 @@ static bool
- intel_edp_init_dpcd(struct intel_dp *intel_dp, struct intel_connector *connector)
- {
- 	struct intel_display *display = to_intel_display(intel_dp);
-+	int i;
- 	int ret;
-
+@@ -4392,7 +4392,26 @@
  	/* this function is meant to be called only once */
  	drm_WARN_ON(display->drm, intel_dp->dpcd[DP_DPCD_REV] != 0);
-
+ 
 -	if (drm_dp_read_dpcd_caps(&intel_dp->aux, intel_dp->dpcd) != 0)
-+	/*
-+	 * On dual GPU MacBook Pros the eDP AUX channel is routed through the
-+	 * gmux. When the panel mux has just been switched to this GPU (e.g.
-+	 * booting with the integrated GPU primary after gpu-switch -i, or a
-+	 * vga_switcheroo reprobe), the panel power sequencer / gmux may not
-+	 * have the AUX channel stable yet. Retry the initial DPCD read a few
-+	 * times before giving up, otherwise the connector is permanently
-+	 * disabled as a "ghost" ("failed to retrieve link info, disabling
-+	 * eDP") on a transient power-up race.
-+	 */
-+	for (i = 0; i < 5; i++) {
-+		ret = drm_dp_read_dpcd_caps(&intel_dp->aux, intel_dp->dpcd);
-+		if (ret == 0)
-+			break;
-+		msleep(50);
+-		return false;
++	{
++		int i;
++
++		/*
++		 * On dual GPU MacBook Pros the eDP AUX channel is routed through the
++		 * gmux. When the panel mux has just been switched to this GPU (e.g.
++		 * booting with the integrated GPU primary after gpu-switch -i, or a
++		 * vga_switcheroo reprobe), the panel power sequencer / gmux may not
++		 * have the AUX channel stable yet. Retry the initial DPCD read a few
++		 * times before giving up, otherwise the connector is permanently
++		 * disabled as a "ghost" ("failed to retrieve link info, disabling
++		 * eDP") on a transient power-up race.
++		 */
++		for (i = 0; i < 5; i++) {
++			if (drm_dp_read_dpcd_caps(&intel_dp->aux, intel_dp->dpcd) == 0)
++				break;
++			msleep(50);
++		}
++		if (i == 5)
++			return false;
 +	}
-+	if (ret != 0)
- 		return false;
-
+ 
  	drm_dp_read_desc(&intel_dp->aux, &intel_dp->desc,
---
+ --
 2.46.0

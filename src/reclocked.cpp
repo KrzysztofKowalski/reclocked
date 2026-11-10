@@ -5,7 +5,7 @@
 //
 //   1. PROFILE app-aware: `default` (cap 07, throttle) vs `preferred` (cap 0e
 //      z eskalacją do 0f przy sustained high busy). Profil wybierany dynamicznie
-//      na podstawie aktywnej apki z Hyprlanda (hyprctl activewindow + clients).
+//      na podstawie aktywnej apki z Mango, Sway lub Hyprlanda.
 //   2. CONFIG /etc/reclocked.conf: lista [preferred] class-ów + progi per profil.
 //      Własny parser INI-line, bez zewnętrznych deps.
 //   3. MANUAL OVERRIDE: flag-file `/run/reclocked/override` — daemon zamraża auto
@@ -44,7 +44,7 @@
 // BOOST-DOWN 0f→0e: temp>temp_up LUB temp>=temp_down (NATYCHMIAST, priorytet)
 //                        OR busy<busy_up (histereza loadowa).
 //
-// Sygnał preferred: hyprctl -j activewindow (focus) + hyprctl -j clients
+// Sygnał preferred: focused + running clients z wybranego backendu kompozytora
 // (running). Preferred aktywne gdy: focused.class ∈ lista LUB (running.class ∈
 // lista AND busy > busy_up). Profile dwell (domyślnie 2 s) rate-limituje zmiany
 // profilu (alt-tab nie migocze ceiling).
@@ -52,12 +52,12 @@
 // Wymaga roota. USTAWIENIA RUNTIME-ONLY: reboot resetuje zegary.
 // Bezpieczeństwo: walidacja pstate ∈ {07,0a,0e,0f}, nigdy zapis gdy ten sam stan,
 // SIGTERM→restore --exit-state, fail-safe hwmon (brak temp → pominięte warunki
-// termalne, nigdy awaryjny UP). Brak Hyprlanda/hyprctl → fallback do default.
+// termalne, nigdy awaryjny UP). Brak kompatybilnego IPC → fallback do default.
 //
 // v4.1 (2026-08-25):
 //   A. BUG-fix detekcji Hyprlanda: detect() jednorazowe przy starcie demona
 //      (systemd → przed sesją) zostawiało demona na default cap=07 na zawsze.
-//      Teraz cykliczny re-detect co poll_ms gdy !hypr_alive.
+//      Teraz cykliczny re-detect co poll_ms gdy backend kompozytora nie żyje.
 //   B. GR-idle gate: DOWN transycje (reclok pamięci w locie) odraczane gdy
 //      chwilowy busy > gr-idle-promille (default 300‰). vblank chroni scanout,
 //      nie GR mid-render — live DOWN pod renderem = wedge kanału (crash pulpitu).
@@ -69,17 +69,18 @@
 //   E. JSON escape fix w json_str/json_str_all (\" \\ \n \t).
 //
 // v4.2 (2026-08-25):
-//   F. KONTROLA WENTYLATORÓW applesmc: klasa Fan — liniowa krzywa temp→RPM dla
-//      obu wentylatorów (fan1=Lewa, fan2=Prawa). Zakresy RPM (fanN_min/max) czytane
+//   F. KONTROLA WENTYLATORÓW SMC: klasa Fan — liniowa krzywa temp→RPM dla
+//      obu wentylatorów (fan1=Lewa, fan2=Prawa), przez applesmc lub macsmc_hwmon.
+//      Zakresy RPM (fanN_min/max) czytane
 //      DYNAMICZNIE z sysfs przy starcie (nie hardkodowane — "wg 2ch wartosci" min/
 //      max na wentylator). x = clamp((temp - temp_min) / (temp_max - temp_min), 0,1);
 //      rpm = fanN_min + round(x * (fanN_max - fanN_min)). Aktualizacja co poll_ms
 //      (1 s). Sekcja [fan]: enable/temp-min(51)/temp-max(91).
 //   G. FAN OVERRIDE: flag-file `/run/reclocked/fan-override` zamraża auto wentyl.
 //      (użytkownik steruje ręcznie: cusfan.sh / fullfan.sh). reclockctl fan-off/on.
-//   H. FAIL-SAFE wentylatorów: restore_auto() przy wyjściu zdejmuje fanN_manual=0
-//      → SMC przejmuje auto (nigdy nie zostawiaj wentyl. zablokowanych na manualu).
-//      init() fail (brak applesmc / absurdalne zakresy) → fan wyłączony bez błędu.
+//   H. FAIL-SAFE wentylatorów: restore_auto() przy wyjściu przekazuje sterowanie
+//      SMC (applesmc: fanN_manual=0; macsmc_hwmon: fanN_target=0). Brak zakresów
+//      lub macsmc_hwmon fan_control=N → krzywa manualna pozostaje wyłączona.
 //
 // v4.3 (2026-08-25):
 //   I. TITLE-MATCH = NAJWYŻSZY priorytet sygnału preferred. Dopasowanie tytułu
@@ -121,8 +122,8 @@
 //      (clang/gcc/g++/cc/c++/cc1/cc1plus/make/cmake/ninja/cargo/rustc/... —
 //      skan /proc/*/comm z fallbackiem na cmdline), wentylatory na fan-max%
 //      (default 100 = pełne wiatraki). Sekcja [compiler]: enable/fan-max/names
-//      (names = dodatkowe nazwy przecinkami). Fan.set_boost(pct) pisze
-//      manual=1 + output dla obu wentylatorów (liniowa interpolacja między
+//      (names = dodatkowe nazwy przecinkami). Fan.set_boost(pct) ustawia
+//      manual/target obu wentylatorów (liniowa interpolacja między
 //      fanN_min a fanN_max). Boost działa TYLKO w auto-mode — fan-override
 //      flag-file (/run/reclocked/fan-override) ma priorytet (nie nadpisuje
 //      ręcznego sterowania). Gdy kompilator zniknie → powrót do krzywej temp
@@ -211,8 +212,8 @@
 //
 // v5.10 (2026-08-28):
 //   AA. TERMIKA OBUDOWY [fan-case] (raport 97, wariant B pełny a+b+c):
-//       pomiar ŚREDNIEJ temperatury obudowy (applesmc po ETYKIETACH tempN_label
-//       → klucz SMC, nie po indeksach; klucze z configu, wartości ujemne m°C
+//       pomiar ŚREDNIEJ temperatury obudowy (SMC hwmon po tempN_label → klucz SMC,
+//       nie po indeksach; klucze z configu, wartości ujemne m°C
 //       pomijane — niepodłączone -127000, jałowy TCTD -250) + krzywa case
 //       (case-min → case-max liniowo, 0..100% zakresu RPM z [fan]) + SOAK/HOLD
 //       (case > case-min przez case-dwell-ms → SOAK na hold-ms z floor = krzywa
@@ -335,9 +336,8 @@ static const char* DGPU_OVERRIDE_FILE = "/run/reclocked/dgpu-override";
 static const char* DGPU_PCI        = "0000:01:00.0";
 static const char* DGPU_AUDIO_PCI  = "0000:01:00.1";
 
-// v4.2: SMC applesmc — sterowanie wentylatorami MacBooka. fan1=Lewa,
-// fan2=Prawa. fanN_manual (1=manual, 0=auto SMC) + fanN_output (cel RPM).
-// fanN_min/fanN_max czytane dynamicznie przy starcie (zależne od HW).
+// v4.2: applesmc compatibility paths; macsmc_hwmon is discovered by hwmon name.
+// fanN_min/fanN_max are read dynamically at startup (hardware-specific).
 static const char* FAN_BASE = "/sys/devices/platform/applesmc.768";
 
 // ------------------------------------- rejestry PMU (BAR0) wg gk20a_devfreq.c
@@ -402,7 +402,7 @@ struct Profile {
 };
 
 struct Config {
-    //Lista class-ów aplikacji "preferred" (dopasowywane do hyprctl class).
+    // App ids/classes reported by the detected compositor backend.
     std::set<std::string> preferred_classes;
     // v4.1: tytuły okien "preferred" (substring case-insensitive; np. "YouTube",
     // "Discord"). Discord/YouTube są kartami w przeglądarce — nie mają własnej
@@ -433,7 +433,7 @@ struct Config {
     int  idle_dwell_ms  = 5000;
     int  win_ms         = 1000;
     int  profile_dwell_ms = 2000; // rate-limit zmiany profilu
-    int  poll_ms        = 1000;   // okres pollingu hyprctl (multiplik interval)
+    int  poll_ms        = 1000;   // compositor IPC polling period (interval multiple)
     int  exit_state     = 0x07;
     // v4.1: próg chwilowego busy (‰) poniżej którego DOWN transycje są
     // dozwolone (GR-idle gate). reclok pamięci w locie pod renderowaniem GR
@@ -442,7 +442,7 @@ struct Config {
     // busy dolinie. UP-LOAD/BOOST-UP NIE są gate'owane (rosnący zegar pamięci
     // bezpieczniejszy; UP wymaga busy>80% więc gate na 30% blokowałby UP).
     int  gr_idle_promille = 300;
-    // v4.2: kontrola wentylatorów applesmc. Krzywa temp→RPM: liniowa interpolacja
+    // v4.2: kontrola wentylatorów SMC. Krzywa temp→RPM: liniowa interpolacja
     // między fanN_min (temp_min) a fanN_max (temp_max), aktualizowana co poll_ms
     // (1 s). fanN_min/fanN_max czytane dynamicznie z sysfs przy starcie (nie
     // hardkodowane — każde HW ma inny zakres). Override flag-file zatrzymuje auto.
@@ -463,7 +463,7 @@ struct Config {
     int  fan_temp_mid_igd = 0;    // °C punkt przegięcia (tylko-iGPU; 0 = wyłączony)
     int  fan_mid_igd    = 0;      // % zakresu RPM przy temp-mid (tylko-iGPU; 0 = wył.)
     // v5.10: sekcja [fan-case] — termika obudowy (raport 97, wariant B pełny):
-    // krzywa case (średnia applesmc) + SOAK/HOLD (trzymanie podbitych obrotów
+    // krzywa case (średnia z SMC hwmon) + SOAK/HOLD (trzymanie podbitych obrotów
     // przez czas) + RAMP (limit zmian RPM na 1 s). enable=false (default) →
     // stary algorytm wentylatorów 1:1 (escape hatch).
     // v5.12: case-min=20 (decyzja usera — fizyczne minimum przy pracy ~40°C
@@ -652,8 +652,18 @@ static int write_file(const char* path, const std::string& data)
     // v5.0: O_CREAT|O_TRUNC — pliki statusu (/run/reclocked/status, /run/switchd/dgpu)
     // nie istnieją przy pierwszym zapisie; bez O_CREAT open() zwraca ENOENT i zapis
     // cicho ginie. Dla sysfs (fan1_manual, fan1_output, pstate itd.) to no-op —
-    // pliki zawsze istnieją, sysfs ignoruje O_TRUNC.
+    // pliki zawsze istnieją, sysfs ignoruje O_TRUNC. Nowe sysfs-y bez O_CREAT używają
+    // write_sysfs_file().
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return -1;
+    ssize_t n = write(fd, data.data(), data.size());
+    close(fd);
+    return n == (ssize_t)data.size() ? 0 : -1;
+}
+
+static int write_sysfs_file(const std::string& path, const std::string& data)
+{
+    int fd = open(path.c_str(), O_WRONLY);
     if (fd < 0) return -1;
     ssize_t n = write(fd, data.data(), data.size());
     close(fd);
@@ -678,6 +688,35 @@ static std::string trim(const std::string& s)
     if (a == std::string::npos) return "";
     size_t b = s.find_last_not_of(" \t\r\n");
     return s.substr(a, b - a + 1);
+}
+
+static bool find_hwmon_device(const std::string& name, std::string& path)
+{
+    DIR* dir = opendir("/sys/class/hwmon");
+    if (!dir) return false;
+
+    struct dirent* entry;
+    while ((entry = readdir(dir))) {
+        if (entry->d_name[0] == '.') continue;
+        std::string candidate = std::string("/sys/class/hwmon/") + entry->d_name;
+        std::string device_name;
+        if (read_file((candidate + "/name").c_str(), device_name) != 0 ||
+            trim(device_name) != name)
+            continue;
+
+        path = candidate;
+        closedir(dir);
+        return true;
+    }
+
+    closedir(dir);
+    return false;
+}
+
+static bool sysfs_attribute_writable(const std::string& path)
+{
+    struct stat st;
+    return stat(path.c_str(), &st) == 0 && (st.st_mode & 0222) != 0;
 }
 
 // v4.1: case-insensitive substring. Pusty needle → false (nie traktuj pustego
@@ -1279,8 +1318,8 @@ private:
     int cpu_fd_ = -1;
 };
 
-// ----------------------------------------------------------- wentylatory (applesmc)
-// v4.2: sterowanie wentylatorami MacBooka przez SMC applesmc. Dwa wentylatory:
+// ----------------------------------------------------------- wentylatory (SMC hwmon)
+// Dwa wentylatory przez applesmc albo standardowy interfejs macsmc_hwmon:
 // fan1 (Lewa), fan2 (Prawa). Zakresy RPM (fanN_min/fanN_max) czytane dynamicznie
 // z sysfs przy starcie — NIE hardkodowane (każde HW ma inny zakres; user chciał
 // "zakresy generowane dynamicznie wg 2ch wartosci" = min/max z sysfs na wentylator).
@@ -1288,19 +1327,29 @@ private:
 // Krzywa temp→RPM: liniowa interpolacja. x = clamp((temp - tmin) / (tmax - tmin))
 // w [0,1]; rpm = fanN_min + round(x * (fanN_max - fanN_min)). temp ≤ tmin → min
 // RPM (najcicho), temp ≥ tmax → max RPM (najgłośniej). Aktualizacja co poll_ms (1 s)
-// — zbieżne z cyklem ankiety hyprctl.
+// — zbieżne z cyklem ankiety kompozytora.
 //
-// Fail-safe: init() zwraca false gdy brak plików applesmc → fan wyłączony bez
-// błędu (demon działa bez sterowania wentylatorami). restore_auto() przy wyjściu
-// zdejmuje manual (fanN_manual=0) → SMC przejmuje auto-kontrolę (reclocked nigdy
-// nie zostawia wentylatorów zablokowanych na manualu po zatrzymaniu).
+// Fail-safe: macsmc_hwmon działa tylko gdy jego niebezpieczny fan_control=Y;
+// przy N demon nie zapisuje targetów. restore_auto() zwraca kontrolę SMC.
 
 class Fan {
+    enum class Backend { APPLESMC, MACSMC_HWMON };
+
 public:
     bool init()
     {
         std::string s;
-        std::string base = std::string(FAN_BASE) + "/";
+        std::string applesmc_min;
+        if (read_file((std::string(FAN_BASE) + "/fan1_min").c_str(), applesmc_min) == 0) {
+            backend_ = Backend::APPLESMC;
+            base_ = FAN_BASE;
+        } else if (find_hwmon_device("macsmc_hwmon", base_)) {
+            backend_ = Backend::MACSMC_HWMON;
+        } else {
+            return false;
+        }
+
+        std::string base = base_ + "/";
         if (read_file((base + "fan1_min").c_str(), s) != 0) return false;
         fan1_min_ = std::atoi(s.c_str());
         if (read_file((base + "fan1_max").c_str(), s) != 0) return false;
@@ -1316,6 +1365,24 @@ public:
                  fan1_min_, fan1_max_, fan2_min_, fan2_max_);
             return false;
         }
+
+        if (backend_ == Backend::MACSMC_HWMON) {
+            if (read_file((base + "fan1_input").c_str(), s) != 0 ||
+                read_file((base + "fan1_target").c_str(), s) != 0 ||
+                read_file((base + "fan2_input").c_str(), s) != 0 ||
+                read_file((base + "fan2_target").c_str(), s) != 0)
+                return false;
+            if (!manual_control_enabled()) {
+                logf(0, "fan: macsmc_hwmon detected read-only; fan_control is not Y, curve disabled");
+                return false;
+            }
+            if (!sysfs_attribute_writable(base + "fan1_target") ||
+                !sysfs_attribute_writable(base + "fan2_target")) {
+                logf(0, "fan: macsmc_hwmon targets are read-only; manual mode unavailable");
+                return false;
+            }
+        }
+
         ok_ = true;
         return true;
     }
@@ -1366,7 +1433,7 @@ public:
     // Boost kompilatora i fan-override są NADRZĘDNE i pomijają ramp (safety).
     void set_pct(double pct, int max_delta_rpm)
     {
-        if (!ok_) return;
+        if (!ok_ || !manual_control_enabled()) return;
         if (pct < 0.0) pct = 0.0;
         if (pct > 1.0) pct = 1.0;
         int rpm1 = fan1_min_ + (int)(pct * (fan1_max_ - fan1_min_) + 0.5);
@@ -1377,16 +1444,24 @@ public:
             if (last_rpm2_ > 0)
                 rpm2 = std::clamp(rpm2, last_rpm2_ - max_delta_rpm, last_rpm2_ + max_delta_rpm);
         }
-        write_file((std::string(FAN_BASE) + "/fan1_manual").c_str(), "1");
-        write_file((std::string(FAN_BASE) + "/fan2_manual").c_str(), "1");
-        write_file((std::string(FAN_BASE) + "/fan1_output").c_str(), std::to_string(rpm1));
-        write_file((std::string(FAN_BASE) + "/fan2_output").c_str(), std::to_string(rpm2));
+        if (backend_ == Backend::APPLESMC) {
+            write_file((base_ + "/fan1_manual").c_str(), "1");
+            write_file((base_ + "/fan2_manual").c_str(), "1");
+            write_file((base_ + "/fan1_output").c_str(), std::to_string(rpm1));
+            write_file((base_ + "/fan2_output").c_str(), std::to_string(rpm2));
+        } else if (write_sysfs_file(base_ + "/fan1_target", std::to_string(rpm1)) != 0 ||
+                   write_sysfs_file(base_ + "/fan2_target", std::to_string(rpm2)) != 0) {
+            write_sysfs_file(base_ + "/fan1_target", "0");
+            write_sysfs_file(base_ + "/fan2_target", "0");
+            logf(0, "fan: macsmc_hwmon target write failed; requested auto control");
+            return;
+        }
         last_rpm1_ = rpm1; last_rpm2_ = rpm2;
     }
 
     // v4.6: BOOST — wymuś pct% maksymalnych RPM (100 = pełne wiatraki). Zamiast
     // krzywej temp→RPM, stały procent zakresu: rpm = fanN_min + pct/100*(fanN_max
-    // - fanN_min). Manual=1 + zapis output dla obu wentylatorów (jak set()).
+    // - fanN_min). Sterowanie manual/target dla obu wentylatorów (jak set()).
     // pct clamp do [0,100]. Używane gdy wykryty kompilator (sekcja [compiler]).
     // v5.10: zapis przez set_pct() z max_delta=0 — boost NADRZĘDNY, pomija ramp
     // (wentylatory mają dojść do fan-max% natychmiast — safety termiczna).
@@ -1402,13 +1477,26 @@ public:
     // Fail-safe: zwróć kontrolę do SMC. Wołane przy wyjściu demona (restore).
     void restore_auto()
     {
-        if (!ok_) return;
-        write_file((std::string(FAN_BASE) + "/fan1_manual").c_str(), "0");
-        write_file((std::string(FAN_BASE) + "/fan2_manual").c_str(), "0");
-        logf(1, "fan: restore auto (fanN_manual=0) — SMC przejmuje");
+        if (!ok_ || !manual_control_enabled()) return;
+        if (backend_ == Backend::APPLESMC) {
+            write_file((base_ + "/fan1_manual").c_str(), "0");
+            write_file((base_ + "/fan2_manual").c_str(), "0");
+        } else {
+            int ret1 = write_sysfs_file(base_ + "/fan1_target", "0");
+            int ret2 = write_sysfs_file(base_ + "/fan2_target", "0");
+            if (ret1 != 0 || ret2 != 0) {
+                logf(0, "fan: macsmc_hwmon failed to restore automatic control");
+                return;
+            }
+        }
+        logf(1, "fan: restore auto — SMC przejmuje");
     }
 
     bool ok() const { return ok_; }
+    const char* backend_name() const
+    {
+        return backend_ == Backend::APPLESMC ? "applesmc" : "macsmc_hwmon";
+    }
     int fan1_min() const { return fan1_min_; }
     int fan1_max() const { return fan1_max_; }
     int fan2_min() const { return fan2_min_; }
@@ -1418,7 +1506,17 @@ public:
     int last_temp() const { return last_temp_; }
 
 private:
+    bool manual_control_enabled() const
+    {
+        if (backend_ != Backend::MACSMC_HWMON) return true;
+        std::string enabled;
+        return read_file("/sys/module/macsmc_hwmon/parameters/fan_control", enabled) == 0 &&
+               trim(enabled) == "Y";
+    }
+
     bool ok_ = false;
+    Backend backend_ = Backend::APPLESMC;
+    std::string base_;
     int fan1_min_ = 0, fan1_max_ = 0;
     int fan2_min_ = 0, fan2_max_ = 0;
     int last_temp_ = -1, last_rpm1_ = 0, last_rpm2_ = 0;
@@ -1426,9 +1524,8 @@ private:
 
 // ----------------------------------------------------------- termika obudowy (case)
 // v5.10: pomiar ŚREDNIEJ temperatury obudowy — [fan-case] (raport 97 §2/§4.2).
-// Mapowanie po ETYKIETACH (tempN_label → klucz SMC), NIE po indeksach tempN
-// (kolejność kluczy z SMC może się różnić między modelami/firmwarem). Co tick
-// czyta tylko klucze z configu ([fan-case] keys) przez mapę label→ścieżka.
+// Mapowanie po kluczach SMC z tempN_label, nie po stałych indeksach tempN.
+// Co tick czyta tylko klucze z configu ([fan-case] keys) przez mapę key→ścieżka.
 // Wartości w m°C; ujemne pomijane (niepodłączone -127000, jałowy dummy TCTD
 // -250). Brak ważnych odczytów → -1 (człon case wyłączony — fallback sam CPU).
 
@@ -1440,11 +1537,23 @@ public:
     void rescan()
     {
         labels_.clear();
-        for (int i = 1; i <= 40; i++) {
-            std::string base = std::string(FAN_BASE) + "/temp" + std::to_string(i);
+        std::string base = FAN_BASE;
+        std::string probe;
+        if (read_file((base + "/fan1_min").c_str(), probe) != 0 &&
+            !find_hwmon_device("macsmc_hwmon", base))
+            return;
+
+        for (int i = 1; i <= 41; i++) {
+            std::string sensor = base + "/temp" + std::to_string(i);
             std::string label;
-            if (read_file((base + "_label").c_str(), label) != 0) continue;
-            labels_[trim(label)] = base + "_input";
+            if (read_file((sensor + "_label").c_str(), label) != 0) continue;
+
+            std::string key = trim(label);
+            size_t open = key.rfind('(');
+            size_t close = key.rfind(')');
+            if (open != std::string::npos && close == key.size() - 1 && close > open + 1)
+                key = trim(key.substr(open + 1, close - open - 1));
+            if (!key.empty()) labels_[key] = sensor + "_input";
         }
     }
 
@@ -1460,7 +1569,7 @@ public:
             auto it = labels_.find(k);
             if (it == labels_.end()) {
                 if (missing_logged.insert(k).second)
-                    logf(0, "fan-case: klucz \"%s\" nieznaleziony w applesmc — pomijany",
+                    logf(0, "fan-case: klucz SMC \"%s\" nieznaleziony w hwmon — pomijany",
                          k.c_str());
                 continue;
             }
@@ -1852,10 +1961,9 @@ static void json_str_all(const std::string& json, const std::string& key,
     }
 }
 
-// Uruchom hyprctl -j <cmd> i zwróć stdout. Zwraca false gdy niedostępne.
-static bool hyprctl_json(const std::string& cmd, std::string& out)
+static bool run_command_output(const std::string& cmd, std::string& out)
 {
-    std::string full = std::string("hyprctl -j ") + cmd + " 2>/dev/null";
+    std::string full = cmd + " 2>/dev/null";
     FILE* p = popen(full.c_str(), "r");
     if (!p) return false;
     char buf[4096];
@@ -1867,10 +1975,86 @@ static bool hyprctl_json(const std::string& cmd, std::string& out)
     return true;
 }
 
+static bool hyprctl_json(const std::string& cmd, std::string& out)
+{
+    return run_command_output(std::string("hyprctl -j ") + cmd, out);
+}
+
+// Mango publikuje osobny socket mmsg w katalogu runtime użytkownika.
+class MangoMsg {
+public:
+    bool detect()
+    {
+        DIR* run = opendir("/run/user");
+        if (!run) return false;
+        struct dirent* e;
+        while ((e = readdir(run))) {
+            if (e->d_name[0] == '.') continue;
+            std::string base = std::string("/run/user/") + e->d_name;
+            DIR* ud = opendir(base.c_str());
+            if (!ud) continue;
+            struct dirent* ue;
+            while ((ue = readdir(ud))) {
+                std::string name = ue->d_name;
+                if (name.rfind("mango-", 0) != 0 || name.size() < 11 ||
+                    name.compare(name.size() - 5, 5, ".sock") != 0)
+                    continue;
+                std::string path = base + "/" + name;
+                struct stat st;
+                if (stat(path.c_str(), &st) != 0 || !S_ISSOCK(st.st_mode)) continue;
+                uid_ = std::atoi(e->d_name);
+                sock_ = path;
+                apply_env();
+                std::string version;
+                if (run_command_output("mmsg get version", version)) {
+                    closedir(ud);
+                    closedir(run);
+                    return true;
+                }
+            }
+            closedir(ud);
+        }
+        closedir(run);
+        return false;
+    }
+
+    void apply_env()
+    {
+        std::string xdg = "/run/user/" + std::to_string(uid_);
+        setenv("XDG_RUNTIME_DIR", xdg.c_str(), 1);
+        setenv("MANGO_INSTANCE_SIGNATURE", sock_.c_str(), 1);
+    }
+
+    bool activewindow(std::string& cls, std::string& title)
+    {
+        std::string json;
+        if (!run_command_output("mmsg get focusing-client", json)) return false;
+        if (!json_str(json, "appid", cls)) return false;
+        json_str(json, "title", title);
+        return !cls.empty();
+    }
+
+    bool clients(std::vector<std::string>& classes)
+    {
+        std::string json;
+        if (!run_command_output("mmsg get all-clients", json) ||
+            json.find("\"clients\"") == std::string::npos)
+            return false;
+        classes.clear();
+        json_str_all(json, "appid", classes);
+        return true;
+    }
+
+    int uid() const { return uid_; }
+    const std::string& sock() const { return sock_; }
+
+private:
+    int uid_ = -1;
+    std::string sock_;
+};
+
 // ----------------------------------------------------------- SwayMsg: backend Sway
-// v5.7: soporte Sway/swayfx para los perfiles por-app. Misma interfaz que HyprCtl
-// para que tick() no cambie. HyprCtl queda como fachada: intenta Hyprland y, si
-// no lo encuentra, Sway.
+// v5.7: soporte Sway/swayfx para los perfiles por-app a través de CompositorCtl.
 //
 // Sway no tiene equivalente de `hyprctl -j activewindow`. Lo mas cercano es el
 // arbol de contenedores (`swaymsg -t get_tree`), donde UN solo nodo trae
@@ -1970,16 +2154,7 @@ private:
     // Corre un comando y devuelve su stdout. Devuelve false si no hay salida.
     static bool run_cmd(const std::string& cmd, std::string& out)
     {
-        std::string full = cmd + " 2>/dev/null";
-        FILE* p = popen(full.c_str(), "r");
-        if (!p) return false;
-        char buf[4096];
-        size_t n;
-        out.clear();
-        while ((n = std::fread(buf, 1, sizeof buf, p)) > 0) out.append(buf, n);
-        int st = pclose(p);
-        if (st != 0 || out.empty()) return false;
-        return true;
+        return run_command_output(cmd, out);
     }
 
     static bool get_tree(std::string& out) { return run_cmd("swaymsg -t get_tree", out); }
@@ -2060,14 +2235,16 @@ private:
     std::string sock_;
 };
 
-// ----------------------------------------------------------- HyprCtl: detekcja
+// ----------------------------------------------------------- compositor detection
 
-class HyprCtl {
+class CompositorCtl {
 public:
-    // Intenta Hyprland y, si no esta, Sway (v5.7). Fachada para que los call
-    // sites de tick() no cambien.
     bool detect()
     {
+        if (mango_.detect()) {
+            backend_ = &mango_;
+            return true;
+        }
         if (detect_hypr()) return true;
         if (sway_.detect()) {
             backend_ = &sway_;
@@ -2077,7 +2254,6 @@ public:
         return false;
     }
 
-    // La deteccion Hyprland pura (sin fallback a Sway).
     bool detect_hypr()
     {
         DIR* run = opendir("/run/user");
@@ -2098,7 +2274,7 @@ public:
                     his_ = he->d_name;
                     closedir(hd);
                     closedir(run);
-                    apply_env();
+                    apply_hypr_env();
                     backend_ = this;
                     return true;
                 }
@@ -2111,48 +2287,68 @@ public:
 
     void apply_env()
     {
-        std::string xdg = "/run/user/" + std::to_string(uid_);
-        setenv("XDG_RUNTIME_DIR", xdg.c_str(), 1);
-        setenv("HYPRLAND_INSTANCE_SIGNATURE", his_.c_str(), 1);
+        if (backend_ == &mango_) mango_.apply_env();
+        else if (backend_ == &sway_) sway_.apply_env();
+        else if (backend_ == this) apply_hypr_env();
     }
 
-    // Delegan al backend activo (Hyprland o Sway).
     bool activewindow(std::string& cls, std::string& title)
     {
+        if (backend_ == &mango_) return mango_.activewindow(cls, title);
         if (backend_ == &sway_) return sway_.activewindow(cls, title);
+        if (backend_ != this) return false;
         std::string json;
         if (!hyprctl_json("activewindow", json)) return false;
-        if (json.find("\"class\"") == std::string::npos) return false; // puste
+        if (json.find("\"class\"") == std::string::npos) return false;
         bool ok = json_str(json, "class", cls);
-        json_str(json, "title", title); // opcjonalne
+        json_str(json, "title", title);
         return ok;
     }
 
     bool clients(std::vector<std::string>& classes)
     {
+        if (backend_ == &mango_) return mango_.clients(classes);
         if (backend_ == &sway_) return sway_.clients(classes);
+        if (backend_ != this) return false;
         std::string json;
         if (!hyprctl_json("clients", json)) return false;
         json_str_all(json, "class", classes);
         return true;
     }
 
-    int uid() const { return backend_ == &sway_ ? sway_.uid() : uid_; }
+    int uid() const
+    {
+        if (backend_ == &mango_) return mango_.uid();
+        if (backend_ == &sway_) return sway_.uid();
+        return uid_;
+    }
+
     const std::string& his() const
     {
-        return backend_ == &sway_ ? sway_.his() : his_;
+        if (backend_ == &mango_) return mango_.sock();
+        if (backend_ == &sway_) return sway_.his();
+        return his_;
     }
-    bool is_sway() const { return backend_ == &sway_; }
+
     const char* backend_name() const
     {
-        return backend_ == &sway_ ? "sway" : (backend_ ? "hyprland" : "ninguno");
+        if (backend_ == &mango_) return "mango";
+        if (backend_ == &sway_) return "sway";
+        return backend_ ? "hyprland" : "ninguno";
     }
 
 private:
+    void apply_hypr_env()
+    {
+        std::string xdg = "/run/user/" + std::to_string(uid_);
+        setenv("XDG_RUNTIME_DIR", xdg.c_str(), 1);
+        setenv("HYPRLAND_INSTANCE_SIGNATURE", his_.c_str(), 1);
+    }
     int uid_ = -1;
     std::string his_;
+    MangoMsg mango_;
     SwayMsg sway_;
-    // nullptr = sin backend; this = Hyprland; &sway_ = Sway.
+    // nullptr = no compositor; this = Hyprland; members = Mango/Sway.
     void* backend_ = nullptr;
 };
 
@@ -2337,12 +2533,10 @@ public:
     struct State {
         std::string vgasw;    // "Pwr" | "Off" | "Dyn" | "DynOff" | ""
         std::string runtime;  // "active" | "suspended" | "unsupported" | ""
-        // vgaswitcheroo jest AUTORYTATYWNY: po odcięciu gmux (DISCRETE_POWER=OFF,
-        // PCI D3hot) nouveau zgłasza stale runtime_status="active", mimo że karta
-        // jest martwa — sam runtime kłamałby (raport 63: busy=1000‰ na martwej
-        // karcie, boost pstate). "Off"/"DynOff" = OFF. runtime tylko jako fallback
-        // (backend runpm bez vgaswitcheroo).
-        bool on() const {
+        // Manual switching trusts vgaswitcheroo because nouveau may retain a stale
+        // runtime_status after gmux power-cut. Runpm uses PCI runtime_status instead.
+        bool on(const std::string& backend) const {
+            if (backend == "runpm") return runtime == "active";
             if (!vgasw.empty()) return vgasw == "Pwr" || vgasw == "Dyn";
             return runtime == "active";
         }
@@ -3048,18 +3242,18 @@ public:
         mkdir("/run/switchd", 0755);
         logf(1, "switchd: topologia=%s, dGPU=%s, nvram_prefs=%s, backend=%s, "
                 "target=%s (w DIS = monitor — zero zmian power)",
-             topo_.name(), power_state_.on() ? "ON" : "OFF",
+              topo_.name(), power_state_.on(cfg_.backend) ? "ON" : "OFF",
              nvram_prefs_.c_str(), cfg_.backend.c_str(), target_name());
     }
 
     // v5.7: cpu_temp — temp CPU (coretemp, °C, -1 gdy brak) dla cpu-temp-gate.
-    void tick(HyprCtl& hypr, int temp, uint32_t last_busy, int cpu_temp)
+    void tick(CompositorCtl& compositor, int temp, uint32_t last_busy, int cpu_temp)
     {
-        // Własne hyprctl (activewindow) — niezależne od pollingu pstate.
+        // Read the focused client independently of pstate polling.
         // v5.6: tytuł okna przekazywany do polityki — promocja tytułowa
         // Discord/YouTube ([preferred-titles]) w decide().
         std::string fcs, ftitle;
-        bool a1 = hypr.activewindow(fcs, ftitle);
+        bool a1 = compositor.activewindow(fcs, ftitle);
 
         // v5.0: dgpu-override — flag-file /run/reclocked/dgpu-override (on|off),
         // wzorzec fan-override (G). Plik istnieje → wymusza target, policy.decide()
@@ -3097,7 +3291,7 @@ public:
         write_status();
     }
 
-    bool dgpu_off() const { return !power_state_.on(); }
+    bool dgpu_off() const { return !power_state_.on(cfg_.backend); }
 
     // v5.0: settle po power-on — nie pisz pstate przez pstate_settle_ms po
     // power-cycle (kernel nvkm_pstate_calc może wisieć po D3hot→D0). Ustawiane
@@ -3149,8 +3343,8 @@ public:
             rollback_off();
             return false;
         }
-        // Krok 3: verify vgaswitcheroo = Pwr.
-        if (st.vgasw != "Pwr") {
+        // Manual switching must reach Pwr; runpm's active state is verified above.
+        if (cfg_.backend != "runpm" && st.vgasw != "Pwr") {
             last_error_ = "vgaswitcheroo != Pwr po power-on";
             logf(0, "switch: BŁĄD recovery — vgaswitcheroo=%s (oczekiwano Pwr)",
                  st.vgasw.c_str());
@@ -3205,7 +3399,7 @@ private:
     void apply()
     {
         auto st = power_.read();
-        bool cur_on = st.on();
+        bool cur_on = st.on(cfg_.backend);
         bool want_on = (target_ == SwitchPolicy::DGPU);
 
         if (want_on != cur_on) {
@@ -3309,7 +3503,7 @@ private:
         // on/off zostaje w "dgpu_power". Nowe pola: input_active (1/0), video (1/0).
         const char* dgpu_state_val = dgpu_state_.c_str();
         if (!g_cfg.dgpu.enable)
-            dgpu_state_val = st.on() ? "on" : "off";
+            dgpu_state_val = st.on(cfg_.backend) ? "on" : "off";
         std::snprintf(buf, sizeof buf,
             "{ \"topology\": \"%s\", \"dgpu_power\": \"%s\", \"dgpu_state\": \"%s\", "
             "\"input_active\": %d, \"video\": %d, "
@@ -3319,7 +3513,7 @@ private:
             "\"fan_tmid\": %d, \"fan_pmid\": %d, "
             "\"fan_rpm1\": %d, \"fan_rpm2\": %d, "
             "\"fan_case_avg\": %.1f, \"fan_case_state\": \"%s\", \"ts\": %lld }\n",
-            topo_.name(), st.on() ? "on" : "off", dgpu_state_val,
+            topo_.name(), st.on(cfg_.backend) ? "on" : "off", dgpu_state_val,
             dgpu_input_active_, dgpu_video_,
             target_name(), json_escape(override_).c_str(),
             json_escape(last_action_).c_str(),
@@ -3329,7 +3523,7 @@ private:
             g_fan_case_avg, g_fan_case_state,
             (long long)std::time(nullptr));
         write_file(SWITCH_STATUS_FILE, buf);
-        write_file(SWITCH_DGPU_FILE, st.on() ? "on" : "off");
+        write_file(SWITCH_DGPU_FILE, st.on(cfg_.backend) ? "on" : "off");
     }
 
     Gpu& gpu_;
@@ -3496,7 +3690,7 @@ static void usage(const char* argv0)
         "  Bezpieczna drabinka AUTO: 07 ↔ 0a ↔ 0e. 0f = BOOST TIER nad drabinką\n"
         "  (wchodzi z 0e przy sustained busy>busy-boost AND temp<temp-up).\n"
         "  Straż termiczna PER-PROFIL: default 65/58, preferred 82/75.\n"
-        "  Profil z hyprctl (activewindow + clients), lista class z configu.\n"
+        "  Profil z Mango/mmsg, Sway/swaymsg lub Hyprland/hyprctl.\n"
         "  UP 07→0a→0e (UP-LOAD): g_cur_idx<ceiling AND temp<temp_up przez\n"
         "                        temp_dwell AND busy>busy_up. Jeden poziom/krok.\n"
         "  BOOST 0e→0f: g_cur_idx==ceiling AND busy>busy_boost przez boost_dwell\n"
@@ -3506,7 +3700,7 @@ static void usage(const char* argv0)
         "                 (busy≤busy_down przez idle_dwell) OR CEILING.\n"
         "  --config PATH      plik konfigu (domyślnie /etc/reclocked.conf)\n"
         "  --interval MS      okres próbkowania (200)\n"
-        "  --poll-ms MS       okres pollingu hyprctl (1000)\n"
+        "  --poll-ms MS       okres pollingu IPC kompozytora (1000)\n"
         "  --busy-up P        %% busy > → UP o 1 poziom (80)\n"
         "  --busy-down P      %% busy ≤ → idle dwell (40)\n"
         "  --busy-boost P     %% busy > → BOOST UP 0e→0f (85)\n"
@@ -3676,29 +3870,30 @@ int main(int argc, char** argv)
     if (!hw_ok)
         logf(0, "UWAGA: hwmon nouveau niedostępny — warunki termalne pominięte (fail-safe)");
 
-    // v4.2: wentylatory applesmc. init czyta fanN_min/max dynamicznie z sysfs.
+    // v4.2: wentylatory SMC. init czyta fanN_min/max dynamicznie z sysfs.
     Fan fan;
     bool fan_ok = false;
     if (g_cfg.fan_enable) {
         fan_ok = fan.init();
         if (fan_ok)
-            logf(1, "fan: applesmc OK — fan1=%d-%d RPM, fan2=%d-%d RPM, "
+            logf(1, "fan: %s OK — fan1=%d-%d RPM, fan2=%d-%d RPM, "
                     "krzywa %d-%d°C (dGPU ON) / %d-%d°C (tylko-iGPU)",
-                 fan.fan1_min(), fan.fan1_max(), fan.fan2_min(), fan.fan2_max(),
+                 fan.backend_name(), fan.fan1_min(), fan.fan1_max(),
+                 fan.fan2_min(), fan.fan2_max(),
                  g_cfg.fan_temp_min, g_cfg.fan_temp_max,
                  g_cfg.fan_temp_min_igd, g_cfg.fan_temp_max_igd);
         else
-            logf(0, "UWAGA: applesmc niedostępny — sterowanie wentylatorami wyłączone (fail-safe)");
+            logf(0, "UWAGA: interfejs SMC do sterowania wentylatorami niedostępny lub read-only");
     } else {
         logf(1, "fan: wyłączony w configu (enable=false)");
     }
 
-    // v5.10: termika obudowy — [fan-case]. Init = skan etykiet applesmc
+    // v5.10: termika obudowy — [fan-case]. Init = skan etykiet SMC hwmon
     // (label → ścieżka tempN_input); case mierzony tylko gdy sekcja włączona.
     SmcCase smc_case;
     if (g_cfg.fan_case.enable) {
         smc_case.init();
-        logf(1, "fan-case: applesmc etykiety: %d znalezionych, keys=%zu, "
+        logf(1, "fan-case: SMC hwmon etykiety: %d znalezionych, keys=%zu, "
                 "krzywa case %d-%d°C, soak-enter=%d°C, dwell-in=%dms, "
                 "soak-hold=%dms (wyjście czasowe), ramp=%d RPM/s",
              smc_case.label_count(), g_cfg.fan_case.keys.size(),
@@ -3736,14 +3931,13 @@ int main(int argc, char** argv)
     gpu.init_counters();
     if (g_cfg.vblank_sync) drm_open();
 
-    // Wykryj Hyprlanda (socket usera). Brak → fallback do default.
-    HyprCtl hypr;
-    bool hypr_ok = hypr.detect();
-    if (hypr_ok)
-        logf(1, "compositor: %s uid=%d sock=%s", hypr.backend_name(), hypr.uid(),
-             hypr.his().c_str());
+    CompositorCtl compositor;
+    bool compositor_ok = compositor.detect();
+    if (compositor_ok)
+        logf(1, "compositor: %s uid=%d sock=%s", compositor.backend_name(), compositor.uid(),
+             compositor.his().c_str());
     else
-        logf(0, "UWAGA: Hyprland niewykryty (/run/user/*/hypr/*/hyprland.lock) — "
+        logf(0, "UWAGA: brak obsługiwanego IPC kompozytora — "
                 "fallback do profilu default (cap 07)");
 
     // Inicjalizuj bieżący indeks drabinki.
@@ -3801,13 +3995,13 @@ int main(int argc, char** argv)
     // Override stan (loguj wejście/wyjście).
     bool prev_override = false;
 
-    // Polling hyprctl: co poll_ms (licznik cykli).
+    // Poll the selected compositor backend every poll_ms.
     int poll_cycles = std::max(1, g_cfg.poll_ms / g_cfg.interval_ms);
     int cycle = 0;
     std::string focused_class;
     std::string focused_title;   // v4.1: do detekcji Discord/YouTube po tytule
     std::vector<std::string> running_classes;
-    bool hypr_alive = hypr_ok;
+    bool compositor_alive = compositor_ok;
     // v4.2: poprzednie RPM do logowania zmian (poziom 1) vs co-1s log (poziom 2).
     int prev_fan_rpm1 = -1, prev_fan_rpm2 = -1;
     bool prev_fan_override = false;
@@ -3833,7 +4027,7 @@ int main(int argc, char** argv)
             "preferred[cap=%s boost=%s busy-boost=%d%% boost-dwell=%dms "
             "temp-up=%d temp-down=%d], "
             "busy-up=%d%% busy-down=%d%%, temp-dwell=%dms idle-dwell=%dms, "
-            "profile-dwell=%dms, hwmon=%s, hypr=%s, vblank=%d, "
+            "profile-dwell=%dms, hwmon=%s, compositor=%s, vblank=%d, "
             "gr-idle=%d‰, preferred-titles=%zu, low-power=%zu, "
             "fan=%s temp[%d-%d] igd[%d-%d] fan1[%d-%d] fan2[%d-%d], stan=%s, switch=%s, "
             "dgpu-active=%s, fan-case=%s case[%d-%d] keys=%zu soak=%dms ramp=%d",
@@ -3846,7 +4040,7 @@ int main(int argc, char** argv)
          g_cfg.busy_up, g_cfg.busy_down, g_cfg.temp_dwell_ms, g_cfg.idle_dwell_ms,
          g_cfg.profile_dwell_ms,
          hw_ok ? hw.path().c_str() : "BRAK",
-         hypr_ok ? "tak" : "nie", g_cfg.vblank_sync ? 1 : 0,
+         compositor_ok ? "tak" : "nie", g_cfg.vblank_sync ? 1 : 0,
          g_cfg.gr_idle_promille,
          g_cfg.preferred_titles.size(), g_cfg.low_power_classes.size(),
          fan_ok ? "tak" : (g_cfg.fan_enable ? "BRAK" : "off"),
@@ -3887,7 +4081,7 @@ int main(int argc, char** argv)
                 if (cli_exit.set)        nc.exit_state = cli_exit.v;
                 if (cli_vblank)          nc.vblank_sync = cli_vblank_val;
                 g_cfg = nc;
-                // v5.10: świeża mapa etykiet applesmc (gdyby SMC dodał czujniki).
+                // v5.10: świeża mapa etykiet SMC hwmon (gdyby SMC dodał czujniki).
                 if (g_cfg.fan_case.enable) smc_case.rescan();
                 logf(1, "SIGHUP: config przeładowany (%s)", g_config_path.c_str());
             } else {
@@ -3906,10 +4100,10 @@ int main(int argc, char** argv)
         }
 
         // v5.0: switchd tick (co poll_cycles) — ZAWSZE, niezależnie od stanu dGPU.
-        // Własne hyprctl (activewindow) + g_last_busy + temp.
+        // Focused client + g_last_busy + temp.
         // v5.7: + hw.read_cpu_temp() (coretemp, -1 gdy brak) — cpu-temp-gate.
         if (sw.enabled() && (cycle % poll_cycles) == 0)
-            sw.tick(hypr, temp, g_last_busy, hw.read_cpu_temp());
+            sw.tick(compositor, temp, g_last_busy, hw.read_cpu_temp());
 
         // v5.0: fan block (co poll_cycles) — PRZENIESIONY przed gate (działa też
         // gdy dGPU OFF; temp=-1 gdy hwmon nouveau zniknął → krzywa min, compiler
@@ -4163,46 +4357,45 @@ int main(int argc, char** argv)
             continue;
         }
 
-        // Polling hyprctl co poll_cycles.
-        // v4.1 Bug-fix: gdy !hypr_alive (daemon startował przed sesją Hyprlanda
-        // — typowe dla usługi systemd), cyklicznie re-detect co poll_ms. Wcześniej
-        // blok był zgated `if (hypr_alive && ...)` — gdy start zawiodło, re-detect
-        // nigdy nie odpalał i demon zostawał na default cap=07 na całą sesję.
+        // Poll the compositor IPC every poll_cycles.
+        // Re-detect periodically if the system service started before the session.
+        // Earlier, this block was gated on the backend being alive, so a failed
+        // re-detect never ran and the daemon stayed on default cap=07 all session.
         if ((cycle % poll_cycles) == 0) {
-            if (hypr_alive) {
+            if (compositor_alive) {
                 std::string fcs, ftitle;
                 std::vector<std::string> rcs;
-                bool a1 = hypr.activewindow(fcs, ftitle);
-                bool a2 = hypr.clients(rcs);
+                bool a1 = compositor.activewindow(fcs, ftitle);
+                bool a2 = compositor.clients(rcs);
                 if (a1) { focused_class = fcs; focused_title = ftitle; }
                 else    { focused_class.clear(); focused_title.clear(); }
                 if (a2) running_classes = rcs; else running_classes.clear();
-                // Jeśli oba zawiodły — może Hyprland zrestartowany. Re-detect.
+                // If both queries fail, the compositor may have restarted.
                 if (!a1 && !a2) {
                     logf(0, "compositor niedostępny — re-detect instancji");
-                    if (hypr.detect()) {
-                        hypr.apply_env();
+                    if (compositor.detect()) {
+                        compositor.apply_env();
                         logf(1, "compositor re-detected: %s uid=%d sock=%s",
-                             hypr.backend_name(), hypr.uid(), hypr.his().c_str());
+                             compositor.backend_name(), compositor.uid(), compositor.his().c_str());
                     } else {
-                        hypr_alive = false;
-                        logf(0, "Hyprland zniknął — fallback do default");
+                        compositor_alive = false;
+                        logf(0, "compositor zniknął — fallback do default");
                     }
                 }
             } else {
-                // !hypr_alive: cykliczny re-detect (sesja może wstać po starcie demona).
-                if (hypr.detect()) {
-                    hypr.apply_env();
-                    hypr_alive = true;
+                // A session may become available after the system service starts.
+                if (compositor.detect()) {
+                    compositor.apply_env();
+                    compositor_alive = true;
                     logf(1, "compositor detected: %s uid=%d sock=%s (sesja gotowa)",
-                         hypr.backend_name(), hypr.uid(), hypr.his().c_str());
+                         compositor.backend_name(), compositor.uid(), compositor.his().c_str());
                     // Natychmiastowy poll tego cyklu — pref_sig nie czeka kolejny poll_ms.
                     std::string fcs, ftitle;
                     std::vector<std::string> rcs;
-                    if (hypr.activewindow(fcs, ftitle)) { focused_class = fcs; focused_title = ftitle; }
-                    if (hypr.clients(rcs)) running_classes = rcs;
+                    if (compositor.activewindow(fcs, ftitle)) { focused_class = fcs; focused_title = ftitle; }
+                    if (compositor.clients(rcs)) running_classes = rcs;
                 }
-                // else: zostań !hypr_alive, retry next poll_ms.
+                // Otherwise retry on the next poll_ms.
             }
         }
         cycle++;
@@ -4212,20 +4405,20 @@ int main(int argc, char** argv)
         // low_power_classes), wymuś default (cap=07) z priorytetem nad preferred.
         // Nawet jeśli Discord/YouTube generuje busy w tle (running-busy), terminal
         // z focusem trzyma 07.
-        bool low_power_focused = hypr_alive && !focused_class.empty() &&
+        bool low_power_focused = compositor_alive && !focused_class.empty() &&
                                  g_cfg.low_power_classes.count(focused_class) > 0;
         // v4.4: klasa z wpisem [caps] — per-klasowa polityka (floor/max/busy-up).
         // Stosowana gdy klasa jest w FOCUS; karta przeglądarki (chromium itd.)
         // nie ma wpisu → title-priority force-0e bez zmian.
         const Config::ClassCap* ccap = nullptr;
-        if (hypr_alive && !focused_class.empty()) {
+        if (compositor_alive && !focused_class.empty()) {
             auto cit = g_cfg.class_caps.find(focused_class);
             if (cit != g_cfg.class_caps.end()) ccap = &cit->second;
         }
         bool cap_class_focused = (ccap != nullptr);
 
         bool pref_sig = false;
-        if (hypr_alive && !low_power_focused) {
+        if (compositor_alive && !low_power_focused) {
             // focused ∈ lista ([preferred] lub [caps])?
             if (!focused_class.empty() &&
                 (g_cfg.preferred_classes.count(focused_class) ||
@@ -4304,7 +4497,7 @@ int main(int argc, char** argv)
         // (status/log „video: ...", decyzja usera #4) — NIE decyduje o stanie
         // pstate: 0e wchodzi wyłącznie przez busy > busy-enter (+ termalne).
         bool title_video = false;
-        if (g_cfg.dgpu.enable && hypr_alive && !cap_class_focused) {
+        if (g_cfg.dgpu.enable && compositor_alive && !cap_class_focused) {
             if (!focused_title.empty()) {
                 for (auto& t : g_cfg.preferred_titles)
                     if (icontains(focused_title, t)) { title_video = true; break; }

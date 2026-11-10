@@ -105,9 +105,9 @@ was debugged and the `DROP_MASTER` fix verified against the Hyprland compositor.
   `/dev/dri/card0` for vblank sync only, then immediately drops DRM master (see
   below). Single-GPU nouveau desktops work too, as long as `card0` is the
   reclocked nouveau device.
-- **systemd** (for the provided `.service` unit) or manual launch. `hyprctl`
-  is optional — when present, app-aware profiles are enabled; when absent, the
-  daemon falls back to the `default` profile.
+- **systemd** (for the provided `.service` unit) or manual launch. Mango `mmsg`,
+  Sway `swaymsg`, and Hyprland `hyprctl` are optional app-aware IPC backends;
+  without a supported backend, the daemon falls back to `default`.
 - The dGPU PCI BDF in `reclocked.cpp` defaults to `0000:01:00.0`. Adjust
   `PCI_RESOURCE`, `PSTATE_FILE`, `POWER_CTRL`, and `DRM_CARD` in the source if
   your card lives at a different address.
@@ -124,14 +124,12 @@ running a root daemon that rewrites GPU clocks every 200 ms. Read
   jump `07 → 0e`. Transitions are load- and thermal-gated with dwell counters.
 - 🪟 **App-aware profiles**: `default` (cap `07`, conservative thermal — for
   terminal/editor) vs `preferred` (cap `0e` — for browser). Profile is chosen
-  from the focused or running window class reported by `hyprctl`, **or** from
-  the focused window title (see title-priority below). `profile-dwell`
+  from the focused or running app id/class reported by Mango, Sway, or Hyprland,
+  **or** from the focused window title (see title-priority below). `profile-dwell`
   rate-limits switching so alt-tab doesn't flap the ceiling.
-- 🔁 **Hyprland re-detect**: the daemon starts as a system service *before* the
-  user session, so the `hyprctl` socket is not yet up at startup. Instead of a
-  one-shot check that leaves the daemon stuck on `default` for the whole
-  session, `reclocked` re-detects Hyprland every poll cycle until the session
-  appears — app-aware profiling activates within ~1 s of login.
+- 🔁 **Compositor re-detect**: the daemon starts as a system service *before*
+  the user session. It retries Mango, Sway, and Hyprland IPC detection each poll
+  cycle, so app-aware profiling activates after the session appears.
 - 🛑 **GR-idle gate**: a live memory downclock while the GR engine is mid-render
   can wedge the compositor (Kepler rewrites framebuffer timings mid-frame →
   render-target PROP traps). vblank sync only protects scanout, not the GR
@@ -383,8 +381,9 @@ reclocked/
 - **systemd** (optional but recommended, for the service unit).
 - **hwmon** exposing `temp1_input` with name `nouveau` (optional; if absent,
   thermal conditions are skipped fail-safe).
-- **hyprctl** (optional, for app-aware profiles). Without it, the daemon runs
-  the `default` profile only.
+- **Mango `mmsg`**, **Sway `swaymsg`**, or **Hyprland `hyprctl`** (optional, for
+  app-aware profiles). Mango uses `MANGO_INSTANCE_SIGNATURE`; without a
+  supported compositor backend, the daemon runs the `default` profile only.
 - **root** to run the daemon (mmap BAR0 + write debugfs pstate).
 
 ---
@@ -436,8 +435,9 @@ deps). CLI flags override config values.
 
 ### `[preferred]` section
 
-List of `hyprctl` window classes that trigger the `preferred` profile when
-focused, or when running + busy > `busy-up`. Example: browsers.
+List of app ids/classes reported by the detected compositor that trigger the
+`preferred` profile when focused, or when running + busy > `busy-up`. Example:
+browsers.
 
 ### `[preferred-titles]` section
 
@@ -686,7 +686,7 @@ and `fan_case_state` (`normal`/`soak`) in `/run/reclocked/status`, also shown by
 | Key | Default | Meaning |
 |---|---|---|
 | `interval-ms` | `200` | Sampling period. |
-| `poll-ms` | `1000` | `hyprctl` polling period (≥ `interval-ms`). |
+| `poll-ms` | `1000` | Compositor IPC polling period (≥ `interval-ms`). |
 | `busy-up` | `80` | % busy > → UP one step (ladder). |
 | `busy-down` | `60` | % busy ≤ → IDLE dwell counts. Hysteresis band 80/60 = 20 pp. |
 | `temp-dwell-ms` | `5000` | Dwell for thermal conditions. |
@@ -742,7 +742,7 @@ temp-per-profile = true
 --config PATH          config file (default /etc/reclocked.conf)
 --exit-state S         pstate on exit (hex, e.g. 0a)
 --interval MS          sampling period
---poll-ms MS           hyprctl poll period
+--poll-ms MS           compositor IPC poll period
 --busy-up P            % busy > → UP one step
 --busy-down P          % busy ≤ → idle dwell
 --busy-boost P         % busy > → BOOST UP 0e→0f
@@ -1059,10 +1059,10 @@ Every `interval-ms` (default 200 ms), `reclocked`:
    driver sysfs gauge.
 2. Reads temperature from the `nouveau` hwmon (`temp1_input`).
 3. Smooths busy over a sliding window (`win-ms`, default 1 s).
-4. Polls `hyprctl` every `poll-ms` (default 1 s) for the focused and running
-   window class **and title**; updates the active profile (`default` vs
-   `preferred`) with `profile-dwell` rate-limiting. Re-detects Hyprland each
-   poll until the session is up (the daemon starts before the user session).
+4. Polls the detected compositor backend every `poll-ms` (default 1 s) for the
+   focused and running app id/class **and title**; updates the active profile
+   (`default` vs `preferred`) with `profile-dwell` rate-limiting. Re-detects
+   Mango, Sway, or Hyprland until the session is up.
    Title matches (`[preferred-titles]`) set `title_pref` and force `0e`
    overriding the busy rule; terminal focus (`[low-power]`) forces `default`.
 5. Evaluates dwell counters (temp-low, temp-high, idle, boost-up) against the
